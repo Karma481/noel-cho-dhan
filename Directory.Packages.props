@@ -1,0 +1,38 @@
+<Project>
+  <!-- Central Package Management: every project references packages without a version. -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <ItemGroup Label="Graphics: DXGI Desktop Duplication, D3D11 compute, DirectComposition overlay">
+    <PackageVersion Include="Vortice.DXGI" Version="3.8.3" />
+    <PackageVersion Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageVersion Include="Vortice.D3DCompiler" Version="3.8.3" />
+    <PackageVersion Include="Vortice.DirectComposition" Version="3.8.3" />
+    <PackageVersion Include="Vortice.Mathematics" Version="2.1.1" />
+  </ItemGroup>
+
+  <ItemGroup Label="Win32 interop (source-generated P/Invoke)">
+    <PackageVersion Include="Microsoft.Windows.CsWin32" Version="0.3.346" />
+  </ItemGroup>
+
+  <ItemGroup Label="LED output">
+    <PackageVersion Include="System.IO.Ports" Version="10.0.12" />
+  </ItemGroup>
+
+  <ItemGroup Label="Hosting, logging, UI">
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
+    <PackageVersion Include="Serilog.Extensions.Hosting" Version="10.0.0" />
+    <PackageVersion Include="Serilog.Sinks.File" Version="7.0.0" />
+    <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageVersion Include="H.NotifyIcon.Wpf" Version="2.4.1" />
+  </ItemGroup>
+
+  <ItemGroup Label="Tests and benchmarks">
+    <!-- xUnit v3 runs natively on Microsoft.Testing.Platform (opted in via global.json); no VSTest adapter needed. -->
+    <PackageVersion Include="xunit.v3" Version="4.0.1" />
+    <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
+  </ItemGroup>
+</Project>

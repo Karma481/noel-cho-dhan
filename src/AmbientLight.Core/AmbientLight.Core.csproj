@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Platform-agnostic contracts shared by every pipeline stage:
+    color/zone/frame/settings types and the lock-free hand-off primitives.
+    Deliberately free of Windows dependencies so it is unit-testable on any OS.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>AmbientLight.Core</RootNamespace>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AmbientLight.Core.Tests" />
+  </ItemGroup>
+</Project>

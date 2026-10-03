@@ -1,0 +1,21 @@
+## .NET build output
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+artifacts/
+TestResults/
+BenchmarkDotNet.Artifacts/
+*.user
+*.suo
+*.userprefs
+.vs/
+.vscode/
+.idea/
+*.rsuser
+
+## Compiled shaders produced at build time
+*.cso
+
+## Firmware (PlatformIO)
+.pio/

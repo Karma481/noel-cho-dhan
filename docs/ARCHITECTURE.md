@@ -1,0 +1,210 @@
+# System-wide Ambient Light — Kiến trúc nền móng
+
+> Trạng thái: **Phase 0 (Foundation)** — đã có kiểu dữ liệu dùng chung, primitive lock-free, settings, test.
+> Các project Windows (Capture/Overlay/Serial/App) được dựng ở các phase tiếp theo trên đúng các hợp đồng này.
+
+---
+
+## 1. Tech stack: **C# / .NET 10 (LTS) + Vortice.Windows 3.8.3**
+
+### 1.1 Bảng đánh giá
+
+| Tiêu chí | C# .NET 10 + Vortice | C++20 + D3D11/D2D | Ghi chú |
+|---|---|---|---|
+| Độ trễ pipeline | ≈ C++ | Tốt nhất (lý thuyết) | Hot path nằm trên **GPU** và **DWM**; phần CPU chỉ vài chục lệnh COM/frame (~µs). Chênh lệch ngôn ngữ < 0.1 ms. |
+| GPU overhead | Như nhau | Như nhau | Do thiết kế shader/overlay quyết định, không do ngôn ngữ. |
+| Rủi ro jitter | GC pause | Không | Loại bỏ bằng **zero-allocation steady state** (buffer cấp phát trước) + `GCSettings.LatencyMode = SustainedLowLatency`. |
+| UI settings / tray | WPF + MVVM, rất nhanh | Win32/Qt/WinUI3 tốn công | ~60% code của app là UI, config, serial, logging. |
+| Serial, JSON, DI, logging | Có sẵn trong BCL | Thư viện ngoài | `System.IO.Ports`, `System.Text.Json` source-gen. |
+| An toàn bộ nhớ / bảo trì | Cao | Thấp hơn | COM lifetime qua `IDisposable`, không UB. |
+| Interop DirectX | Vortice (SharpGen, mỏng, sát API gốc) | Native | Vortice 3.8.3 target `net10.0`, bao phủ DXGI 1.6, D3D11.4, DComp. |
+
+### 1.2 Kết luận
+
+**Chốt C# .NET 10 LTS + Vortice.Windows.** Lý do quyết định: ngân sách 16 ms bị chi phối bởi DWM (thời điểm frame được compose), GPU readback và đường truyền serial — không phải tốc độ ngôn ngữ. C++ chỉ thắng ở GC, và GC bị vô hiệu hoá trên hot path bằng thiết kế không cấp phát. Đổi lại, C# rút ngắn đáng kể phần UI/serial/config và dễ bảo trì hơn.
+
+- .NET 10 thay cho .NET 8/9: .NET 10 là LTS hiện hành (hỗ trợ đến 11/2028); .NET 9 là STS hết hỗ trợ 11/2026; .NET 8 hết 11/2026.
+- Điều kiện để lựa chọn này đúng (sẽ có benchmark + `dotnet-counters` kiểm chứng): **allocation rate = 0 B/s** trên các thread pipeline ở trạng thái ổn định.
+
+---
+
+## 2. Pipeline & Threading
+
+### 2.1 Điều chỉnh quan trọng so với đề bài
+
+Đề xuất ban đầu đặt *Downscale/Edge Extraction* trên Processing Thread (CPU). Làm vậy phải đọc ngược toàn bộ frame về RAM: 4K BGRA = **33 MB/frame ≈ 2 GB/s ở 60 fps** qua PCIe + memcpy — phá cả mục tiêu < 16 ms lẫn < 2% GPU.
+
+➡️ **Downscale + trích xuất viền chạy bằng Compute Shader ngay trên GPU**, trong thread sở hữu D3D device (Capture). Chỉ **N zone × 16 byte** (≈ 1.6 KB cho 100 LED) được đọc về CPU. Processing Thread làm phần CPU thuần: hiệu chỉnh màu, làm mượt, giới hạn công suất.
+
+### 2.2 Sơ đồ luồng dữ liệu
+
+```
+ DWM compose ─► [T1] Capture & GPU Reduce ───────────────────────────────────────────┐
+                 AcquireNextFrame (DXGI Desktop Duplication, blocking, 0% CPU khi chờ) │
+                 CS: lấy mẫu N×N/zone, sRGB→linear, HDR tone-map, average             │
+                 ReleaseFrame ngay sau khi submit                                     │
+                 ID3D11Fence + event → Map staging (~1.6 KB)                          │
+                       │                                                              │
+                       ▼  LatestValueMailbox<ZoneSampleFrame>   (triple buffer, wait-free)
+                 [T2] Processing (CPU)
+                   white balance → saturation → brightness → EMA smoothing (theo Δt)
+                   → black threshold → LED gamma → power limiter (mA) → ColorRgb
+                       │
+                       ▼  LatestValueBroadcaster<FrameData>     (1 → N, mỗi consumer 1 triple buffer)
+            ┌──────────┴───────────┐
+            ▼                      ▼
+   [T3] Overlay Render        [T4] Serial Output
+   D3D11 device riêng         Adalight frame = header 6 B + RGB
+   DirectComposition          ghi thẳng FrameData.ColorBytes (zero-copy)
+   chỉ vẽ khi màu đổi         keep-alive 500 ms
+```
+
+### 2.3 Bảng thread
+
+| Thread | Ưu tiên | Ngủ trên | Việc làm | Không bao giờ bị chặn bởi |
+|---|---|---|---|---|
+| **T1 Capture & GPU Reduce** | MMCSS "Capture" | `AcquireNextFrame` (DWM event) | Lấy frame, dispatch CS, readback | T2, T3, T4 |
+| **T2 Processing** | AboveNormal | Mailbox event, hoặc timer 1 frame khi smoothing còn hội tụ | Pipeline màu CPU | T3, T4 |
+| **T3 Overlay Render** | AboveNormal | Mailbox event | Upload ≤ 1 KB constant buffer, vẽ strip, `Present` | T4 |
+| **T4 Serial Output** | AboveNormal | Mailbox event / keep-alive timeout | `SerialPort.Write` | Mọi thread khác |
+
+Mỗi thread chỉ sở hữu tài nguyên của mình: T1 và T3 dùng **hai ID3D11Device riêng** → không chia sẻ immediate context, không cần `ID3D11Multithread`.
+
+### 2.4 Cơ chế lock-free (đã hiện thực trong `AmbientLight.Core/Threading`)
+
+| Primitive | Mô hình | Đảm bảo |
+|---|---|---|
+| `TripleBuffer<T>` | SPSC, 3 slot cấp phát trước | **Wait-free** cả hai phía: mỗi thao tác đúng 1 `Interlocked.Exchange`. Không torn read, luôn lấy frame mới nhất, frame cũ bị bỏ (latest-wins). |
+| `LatestValueMailbox<T>` | Triple buffer + `AutoResetEvent` | Consumer ngủ trong kernel (0% CPU) khi không có dữ liệu. Event không mang dữ liệu và `Set()` không block producer. |
+| `LatestValueBroadcaster<T>` | 1 producer → N mailbox | Mỗi consumer có bản sao riêng (vài trăm byte): serial bị nghẽn USB **không thể** làm overlay mất frame. |
+| `SettingsHolder` | Immutable snapshot + volatile reference | Thread đọc `Current` một lần/vòng lặp → không bao giờ thấy cấu hình áp dụng dở dang. Lock chỉ ở phía ghi (UI), không nằm trên hot path. |
+
+Bằng chứng: test `ConcurrentProducerAndConsumer_NeverObserveTornOrStaleFrames` chạy 2.000.000 frame song song, xác minh không có frame bị xé và sequence luôn tăng.
+
+**Vì sao "latest-wins" là đúng:** với ánh sáng thời gian thực, hiển thị một màu cũ muộn còn tệ hơn bỏ qua nó. Mọi hàng đợi (queue) đều tích luỹ độ trễ khi consumer chậm; triple buffer thì không.
+
+### 2.5 Ngân sách độ trễ (DWM present → LED sáng), 100 LED
+
+| Chặng | Ước tính |
+|---|---|
+| DWM compose → `AcquireNextFrame` trả về | 0.5 – 1 ms |
+| CS reduce + fence + readback 1.6 KB | 0.3 – 1 ms |
+| Processing CPU | < 0.05 ms |
+| Đánh thức thread (event) | < 0.1 ms |
+| Truyền serial 306 B @ 2 Mbaud | 1.5 ms |
+| USB latency (CH340/native CDC; **FTDI phải đặt latency timer = 1 ms**, mặc định 16 ms) | ≈ 1 ms |
+| MCU xuất WS2812B (30 µs/LED) | 3 ms |
+| **Tổng** | **≈ 7 – 9 ms** ✅ |
+
+Đo thật bằng `FrameTiming`: DXGI `LastPresentTime` và `Stopwatch` cùng đồng hồ QPC → latency = phép trừ.
+
+**Cảnh báo baud rate** (đã đưa vào `AppSettings.Validate()`): 100 LED @ 115200 baud mất **26.6 ms/frame** → không thể đạt 60 Hz. Cần ≥ 1.000.000 baud; 300 LED @ 1 Mbaud = 9.06 ms.
+
+**Overlay ảo:** nội dung overlay chỉ hiện ở lần DWM compose kế tiếp, nên trễ ≥ 1 chu kỳ refresh (≈ 16.7 ms @ 60 Hz) so với nội dung gốc. Đây là giới hạn vật lý của mọi overlay trên Windows; glow là tín hiệu tần số thấp đã được làm mượt nên mắt không nhận ra.
+
+### 2.6 Ngân sách GPU (< 2%)
+
+- **Reduce:** 100 zone × 16×16 mẫu = 25.600 texel/frame — không đáng kể (< 0.05 ms).
+- **Overlay:** render glow ở **1/8 độ phân giải**, để DirectComposition upscale bilinear. Glow là tần số thấp nên blur "miễn phí", chi phí fill giảm 64×. Chỉ `Present` khi màu thay đổi → màn hình tĩnh = 0 GPU.
+- Chi phí còn lại là của DWM cho Desktop Duplication (cố định, mọi ứng dụng ambient đều chịu).
+
+### 2.7 Rủi ro kỹ thuật đã nhận diện
+
+| Rủi ro | Giải pháp |
+|---|---|
+| **Vòng phản hồi**: overlay nằm đúng vùng đang lấy mẫu → bị capture lại → màu tự khuếch đại | `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` (Win10 2004+). Phase Capture sẽ có test tích hợp xác minh overlay không xuất hiện trong frame duplication. |
+| Video DRM (Netflix/Disney+ trong Edge/Chrome, PlayReady) | Desktop Duplication nhận vùng đen — giới hạn của OS. Ghi rõ trong UI; YouTube/trình duyệt thường và game không bị ảnh hưởng. |
+| Game exclusive fullscreen | Windows 10/11 chuyển phần lớn sang flip-model/FSO nên duplication vẫn hoạt động; LED vẫn chạy. Overlay không thể vẽ đè exclusive fullscreen thật. |
+| HDR | `IDXGIOutput5.DuplicateOutput1` với `R16G16B16A16_FLOAT` (scRGB), tone-map trong shader (`CaptureSettings.HdrToneMapping`). |
+| Mất duplication (UAC, đổi độ phân giải, lock screen) | `DXGI_ERROR_ACCESS_LOST` → tái tạo duplication, `ZoneSampleFrame.LayoutVersion`/kích thước nguồn báo cho consumer. |
+| Arduino AVR mất byte khi đang xuất LED (ngắt bị tắt) | Khuyến nghị **ESP32** (RMT/I2S DMA không chặn ngắt). Header Adalight có checksum để tự đồng bộ lại. |
+
+---
+
+## 3. Kiểu dữ liệu dùng chung (`AmbientLight.Core`)
+
+| Kiểu | Loại | Vai trò | Quyết định thiết kế |
+|---|---|---|---|
+| `ColorRgb` | `readonly record struct`, **packed 3 byte** | Màu 8-bit cuối cùng | `MemoryMarshal.AsBytes(span)` = đúng payload Adalight, không copy. |
+| `NormalizedRect` | `readonly record struct` (4 × float) | Vùng lấy mẫu 0..1 | Độc lập độ phân giải/DPI, map thẳng HLSL `float4`. |
+| `ZoneConfig` | `readonly record struct`, blittable 24 B | 1 zone = 1 LED = 1 đoạn overlay | `Index` = vị trí trên dải LED → mảng zone đã theo thứ tự wire. Upload thẳng `StructuredBuffer`. |
+| `ZoneLayoutBuilder` | static | Sinh zone từ số LED mỗi cạnh, góc bắt đầu, chiều chạy | Đã test đủ 4 góc × 2 chiều. |
+| `ZoneSampleFrame` | class tái sử dụng | T1 → T2: màu **linear float** mỗi zone | Làm mượt/cân trắng trong không gian tuyến tính → đúng vật lý, không banding vùng tối. |
+| `FrameData` | class tái sử dụng | T2 → T3/T4: `ColorRgb` cuối | `ColorBytes` zero-copy; `IsTransitioning` cho biết smoothing chưa hội tụ. |
+| `FrameTiming` | `readonly record struct` | Timestamp QPC xuyên pipeline | Đo latency end-to-end bằng phép trừ. |
+| `AppSettings` (+ `Capture/Processing/Overlay/Serial/LedLayoutSettings`) | `sealed record` bất biến | Cấu hình | JSON source-gen (AOT-safe), validate theo đường dẫn (`serial.baudRate`), ghi file nguyên tử (temp + rename). |
+| `SettingsHolder` / `SettingsSnapshot` | class / record | Phát hành cấu hình cho thread | Settings + zone layout + version trong **một** snapshot nhất quán. |
+
+---
+
+## 4. Cấu trúc thư mục
+
+```
+noel-cho-dhan/
+├── AmbientLight.slnx                     ✅ solution (định dạng XML mới của .NET 10)
+├── global.json                           ✅ ghim SDK 10.0.1xx + Microsoft.Testing.Platform
+├── Directory.Build.props                 ✅ nullable, analyzers latest-recommended, warnings-as-errors
+├── Directory.Build.targets               ✅ quy ước riêng cho project test
+├── Directory.Packages.props              ✅ Central Package Management — mọi phiên bản ở một chỗ
+├── .editorconfig / .gitignore            ✅
+├── docs/
+│   └── ARCHITECTURE.md                   ✅ tài liệu này
+├── src/
+│   ├── AmbientLight.Core/                ✅ net10.0 — không phụ thuộc Windows, test được trên mọi OS
+│   │   ├── Color/ColorRgb.cs
+│   │   ├── Zones/ScreenEdge.cs, NormalizedRect.cs, ZoneConfig.cs, ZoneLayoutBuilder.cs
+│   │   ├── Frames/ICopyFrom.cs, FrameTiming.cs, ZoneSampleFrame.cs, FrameData.cs
+│   │   ├── Settings/AppSettings.cs, SettingsIssue.cs, AppSettingsJsonContext.cs,
+│   │   │            AppSettingsStore.cs, SettingsHolder.cs
+│   │   └── Threading/TripleBuffer.cs, LatestValueMailbox.cs, LatestValueBroadcaster.cs
+│   ├── AmbientLight.Capture/             Phase 1 — net10.0-windows: DXGI Desktop Duplication,
+│   │   └── Shaders/ZoneReduce.hlsl         compute shader reduce, fence readback, HDR
+│   ├── AmbientLight.Processing/          Phase 2 — net10.0: pipeline màu CPU (thuần, test được)
+│   ├── AmbientLight.Overlay/             Phase 3 — net10.0-windows: Win32 layered window (CsWin32),
+│   │   └── Shaders/Glow.hlsl               DirectComposition + swapchain, WDA_EXCLUDEFROMCAPTURE
+│   ├── AmbientLight.Output.Serial/       Phase 4 — net10.0: Adalight encoder + writer, power limiter
+│   └── AmbientLight.App/                 Phase 5 — net10.0-windows WPF: tray, settings UI, composition root
+├── tests/
+│   ├── AmbientLight.Core.Tests/          ✅ 38 test (xUnit v3 trên Microsoft.Testing.Platform)
+│   ├── AmbientLight.Processing.Tests/    Phase 2
+│   └── AmbientLight.Output.Serial.Tests/ Phase 4
+├── benchmarks/
+│   └── AmbientLight.Benchmarks/          Phase 2 — BenchmarkDotNet, khẳng định 0 B allocated/frame
+└── firmware/
+    └── esp32-adalight/                   Phase 4 — PlatformIO + FastLED, RMT output
+```
+
+Quy tắc phụ thuộc (một chiều, không vòng): `App → {Capture, Processing, Overlay, Output.Serial} → Core`. Không project nào ngoài `App` được tham chiếu project anh em; chúng chỉ giao tiếp qua kiểu trong `Core`.
+
+---
+
+## 5. Dependencies (đã xác minh trên nuget.org, 10/2026)
+
+| Package | Phiên bản | Dùng ở | Mục đích |
+|---|---|---|---|
+| Vortice.DXGI | 3.8.3 | Capture, Overlay | Desktop Duplication (`IDXGIOutput5.DuplicateOutput1`), swapchain |
+| Vortice.Direct3D11 | 3.8.3 | Capture, Overlay | Compute shader, fence (`ID3D11Device5`), staging readback |
+| Vortice.D3DCompiler | 3.8.3 | Capture, Overlay | Biên dịch HLSL (cache bytecode `.cso`) |
+| Vortice.DirectComposition | 3.8.3 | Overlay | Visual tree trong suốt, upscale bilinear miễn phí |
+| Vortice.Mathematics | 2.1.1 | Capture, Overlay | Kiểu vector/màu cho constant buffer |
+| Microsoft.Windows.CsWin32 | 0.3.346 | Overlay, App | P/Invoke source-gen: `CreateWindowEx`, `SetWindowDisplayAffinity`, `AvSetMmThreadCharacteristics` |
+| System.IO.Ports | 10.0.12 | Output.Serial | Cổng COM |
+| Microsoft.Extensions.Hosting | 10.0.12 | App | DI, lifetime, cấu hình |
+| Microsoft.Extensions.Logging.Abstractions | 10.0.12 | Các thư viện | `ILogger` không kéo theo host |
+| Serilog.Extensions.Hosting | 10.0.0 | App | Logging có cấu trúc |
+| Serilog.Sinks.File | 7.0.0 | App | Log file xoay vòng |
+| CommunityToolkit.Mvvm | 8.4.2 | App | MVVM source-gen cho UI settings |
+| H.NotifyIcon.Wpf | 2.4.1 | App | Icon khay hệ thống |
+| xunit.v3 | 4.0.1 | tests | Test framework (chạy native trên Microsoft.Testing.Platform) |
+| BenchmarkDotNet | 0.15.8 | benchmarks | Đo latency & allocation |
+
+Yêu cầu môi trường: Windows 10 2004+ / Windows 11, GPU hỗ trợ D3D11.4 (feature level 11_0), .NET 10 SDK, Visual Studio 2026 hoặc Rider 2025.3+.
+
+---
+
+## 6. Lệnh phát triển
+
+```bash
+dotnet build -c Release      # 0 warning là bắt buộc (TreatWarningsAsErrors)
+dotnet test  -c Release      # Microsoft.Testing.Platform
+```
