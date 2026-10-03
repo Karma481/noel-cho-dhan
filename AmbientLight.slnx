@@ -1,10 +1,15 @@
 <Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/AmbientLight.Benchmarks/AmbientLight.Benchmarks.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/AmbientLight.Capture/AmbientLight.Capture.csproj" />
     <Project Path="src/AmbientLight.Core/AmbientLight.Core.csproj" />
+    <Project Path="src/AmbientLight.Processing/AmbientLight.Processing.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/AmbientLight.Capture.Tests/AmbientLight.Capture.Tests.csproj" />
     <Project Path="tests/AmbientLight.Core.Tests/AmbientLight.Core.Tests.csproj" />
+    <Project Path="tests/AmbientLight.Processing.Tests/AmbientLight.Processing.Tests.csproj" />
   </Folder>
 </Solution>

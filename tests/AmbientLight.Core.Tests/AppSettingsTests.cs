@@ -173,13 +173,19 @@ public sealed class AppSettingsTests
     {
         var source = new FrameData(4) { Sequence = 3, LayoutVersion = 2, SourceWidth = 3840, SourceHeight = 2160, IsTransitioning = true };
         source.SetZoneCount(2);
-        source.Colors[1] = Color.ColorRgb.White;
+        source.LedColors[1] = Color.ColorRgb.White;
+        source.DisplayColors[0] = new Color.ColorRgb(9, 8, 7);
+        source.ContentBounds = new NormalizedRect(0f, 0.12f, 1f, 0.76f);
+        source.PowerLimitScale = 0.5f;
         var target = new FrameData(4);
 
         target.CopyFrom(source);
 
         Assert.Equal(2, target.ZoneCount);
-        Assert.Equal(Color.ColorRgb.White, target.Colors[1]);
+        Assert.Equal(Color.ColorRgb.White, target.LedColors[1]);
+        Assert.Equal(new Color.ColorRgb(9, 8, 7), target.DisplayColors[0]);
+        Assert.Equal(source.ContentBounds, target.ContentBounds);
+        Assert.Equal(0.5f, target.PowerLimitScale);
         Assert.Equal(3, target.Sequence);
         Assert.Equal(2, target.LayoutVersion);
         Assert.Equal(3840, target.SourceWidth);

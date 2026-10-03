@@ -2,13 +2,15 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using AmbientLight.Capture.Recovery;
+using AmbientLight.Core.Frames;
 using AmbientLight.Core.Zones;
 using Vortice.Direct3D11;
 
 namespace AmbientLight.Capture.Gpu;
 
 /// <summary>
-/// Runs ZoneReduce.hlsl over a desktop surface and reads the per-zone colors back to the CPU.
+/// Runs the ZoneReduce.hlsl kernels over a desktop surface and reads the per-zone colors (and, when
+/// letterbox detection is on, the per-line luminance profile) back to the CPU.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -28,6 +30,7 @@ internal sealed class GpuZoneReducer : IDisposable
     private static readonly TimeSpan GpuCompletionTimeout = TimeSpan.FromMilliseconds(500);
 
     private const int OutputStride = 16;
+    private const int ProfileLength = ZoneSampleFrame.ProfileResolution * 2;
 
     private readonly CaptureDevice _device;
     private readonly ID3D11ComputeShader _shader;
@@ -38,12 +41,19 @@ internal sealed class GpuZoneReducer : IDisposable
     private readonly ID3D11Buffer _stagingBuffer;
     private readonly ID3D11Buffer _constantBuffer;
     private readonly ID3D11SamplerState _sampler;
+    private readonly ID3D11ComputeShader _profileShader;
+    private readonly ID3D11Buffer _profileBuffer;
+    private readonly ID3D11UnorderedAccessView _profileView;
+    private readonly ID3D11Buffer _profileStagingBuffer;
+    private readonly ID3D11Buffer _profileConstantBuffer;
     private readonly ID3D11Fence? _fence;
     private readonly AutoResetEvent _fenceEvent = new(initialState: false);
     private readonly ZoneConfig[] _zoneUpload;
 
     private ZoneReduceConstants _uploadedConstants;
     private bool _constantsUploaded;
+    private EdgeProfileConstants _uploadedProfileConstants;
+    private bool _profileConstantsUploaded;
     private ulong _fenceValue;
 
     public GpuZoneReducer(CaptureDevice device, int capacity)
@@ -56,7 +66,7 @@ internal sealed class GpuZoneReducer : IDisposable
         _zoneUpload = new ZoneConfig[capacity];
         var d3d = device.Device;
 
-        _shader = d3d.CreateComputeShader(ZoneReduceShader.Bytecode);
+        _shader = d3d.CreateComputeShader(ZoneReduceShader.ZoneReduce);
 
         _zoneBuffer = d3d.CreateBuffer(new BufferDescription
         {
@@ -96,6 +106,33 @@ internal sealed class GpuZoneReducer : IDisposable
         });
 
         _sampler = d3d.CreateSamplerState(SamplerDescription.LinearClamp);
+
+        _profileShader = d3d.CreateComputeShader(ZoneReduceShader.EdgeProfile);
+        _profileBuffer = d3d.CreateBuffer(new BufferDescription
+        {
+            ByteWidth = sizeof(float) * ProfileLength,
+            Usage = ResourceUsage.Default,
+            BindFlags = BindFlags.UnorderedAccess,
+            MiscFlags = ResourceOptionFlags.BufferStructured,
+            StructureByteStride = sizeof(float),
+        });
+        _profileView = d3d.CreateUnorderedAccessView(_profileBuffer);
+        _profileStagingBuffer = d3d.CreateBuffer(new BufferDescription
+        {
+            ByteWidth = sizeof(float) * ProfileLength,
+            Usage = ResourceUsage.Staging,
+            BindFlags = BindFlags.None,
+            CPUAccessFlags = CpuAccessFlags.Read,
+            MiscFlags = ResourceOptionFlags.BufferStructured,
+            StructureByteStride = sizeof(float),
+        });
+        _profileConstantBuffer = d3d.CreateBuffer(new BufferDescription
+        {
+            ByteWidth = EdgeProfileConstants.SizeInBytes,
+            Usage = ResourceUsage.Default,
+            BindFlags = BindFlags.ConstantBuffer,
+        });
+
         _fence = TryCreateFence(device);
     }
 
@@ -120,15 +157,28 @@ internal sealed class GpuZoneReducer : IDisposable
 
     /// <summary>
     /// Reduces <paramref name="desktop"/> to <c>constants.ZoneCount</c> colors written to
-    /// <paramref name="destination"/>, and returns the time from submission to data on the CPU.
+    /// <paramref name="destination"/> and, when <paramref name="profileDestination"/> is not empty, also
+    /// computes the row/column luminance profile into it. Both kernels share one submission and one fence
+    /// wait. Returns the time from submission to data on the CPU.
     /// </summary>
-    public TimeSpan Reduce(ID3D11ShaderResourceView desktop, in ZoneReduceConstants constants, Span<Vector3> destination)
+    public TimeSpan Reduce(
+        ID3D11ShaderResourceView desktop,
+        in ZoneReduceConstants constants,
+        Span<Vector3> destination,
+        in EdgeProfileConstants profileConstants,
+        Span<float> profileDestination)
     {
         ArgumentNullException.ThrowIfNull(desktop);
         var zoneCount = (int)constants.ZoneCount;
         if (zoneCount <= 0 || zoneCount > Capacity || destination.Length < zoneCount)
         {
             throw new ArgumentOutOfRangeException(nameof(constants), zoneCount, "Zone count is outside the reducer capacity or the destination size.");
+        }
+
+        var withProfile = !profileDestination.IsEmpty;
+        if (withProfile && profileDestination.Length != ProfileLength)
+        {
+            throw new ArgumentException($"The profile destination must hold exactly {ProfileLength} values.", nameof(profileDestination));
         }
 
         var context = _device.Context;
@@ -150,20 +200,52 @@ internal sealed class GpuZoneReducer : IDisposable
         context.CSSetUnorderedAccessView(0, _outputView);
 
         context.Dispatch((uint)zoneCount, 1, 1);
+        context.CSUnsetUnorderedAccessView(0);
+
+        if (withProfile)
+        {
+            if (!_profileConstantsUploaded || _uploadedProfileConstants != profileConstants)
+            {
+                var upload = profileConstants;
+                context.UpdateSubresource(in upload, _profileConstantBuffer);
+                _uploadedProfileConstants = profileConstants;
+                _profileConstantsUploaded = true;
+            }
+
+            // b0 stays bound: the profile kernel decodes texels with the same encoding constants.
+            context.CSSetShader(_profileShader);
+            context.CSSetConstantBuffer(1, _profileConstantBuffer);
+            context.CSSetUnorderedAccessView(1, _profileView);
+            context.Dispatch(ProfileLength, 1, 1);
+            context.CSUnsetUnorderedAccessView(1);
+        }
 
         // Unbind so no pipeline state keeps referencing the duplication surface after ReleaseFrame.
         context.CSUnsetShaderResource(1);
-        context.CSUnsetUnorderedAccessView(0);
 
         context.CopyResource(_stagingBuffer, _outputBuffer);
+        if (withProfile)
+        {
+            context.CopyResource(_profileStagingBuffer, _profileBuffer);
+        }
+
         WaitForGpu();
         ReadBack(zoneCount, destination);
+        if (withProfile)
+        {
+            ReadBackProfile(profileDestination);
+        }
 
         return Stopwatch.GetElapsedTime(started);
     }
 
     public void Dispose()
     {
+        _profileConstantBuffer.Dispose();
+        _profileStagingBuffer.Dispose();
+        _profileView.Dispose();
+        _profileBuffer.Dispose();
+        _profileShader.Dispose();
         _fence?.Dispose();
         _fenceEvent.Dispose();
         _sampler.Dispose();
@@ -237,6 +319,20 @@ internal sealed class GpuZoneReducer : IDisposable
         finally
         {
             context.Unmap(_stagingBuffer);
+        }
+    }
+
+    private void ReadBackProfile(Span<float> destination)
+    {
+        var context = _device.Context;
+        var mapped = context.Map(_profileStagingBuffer, MapMode.Read, MapFlags.None);
+        try
+        {
+            MemoryMarshal.Cast<byte, float>(mapped.AsSpan(ProfileLength * sizeof(float))).CopyTo(destination);
+        }
+        finally
+        {
+            context.Unmap(_profileStagingBuffer);
         }
     }
 }

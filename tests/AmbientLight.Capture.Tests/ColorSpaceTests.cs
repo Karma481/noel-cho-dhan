@@ -1,3 +1,4 @@
+using System.Numerics;
 using AmbientLight.Capture.ColorSpace;
 using AmbientLight.Core.Settings;
 using AmbientLight.Core.Zones;
@@ -143,7 +144,7 @@ public sealed class ColorSpaceTests
         var zones = ZoneLayoutBuilder.Build(new LedLayoutSettings());
         var transformed = new ZoneConfig[zones.Length];
 
-        SurfaceOrientation.TransformZones(zones.AsSpan(), rotation, transformed);
+        SurfaceOrientation.TransformZones(zones.AsSpan(), NormalizedRect.Full, rotation, transformed);
 
         for (var i = 0; i < zones.Length; i++)
         {
@@ -151,6 +152,46 @@ public sealed class ColorSpaceTests
             Assert.Equal(zones[i].Edge, transformed[i].Edge);
             Assert.True(transformed[i].Region.IsValid, $"Zone {i} at {rotation}: {transformed[i].Region}");
         }
+    }
+
+    [Theory]
+    [InlineData(ModeRotation.Identity)]
+    [InlineData(ModeRotation.Rotate90)]
+    [InlineData(ModeRotation.Rotate180)]
+    [InlineData(ModeRotation.Rotate270)]
+    public void Affine_AgreesWithRectTransform(ModeRotation rotation)
+    {
+        var (origin, axisU, axisV) = SurfaceOrientation.VisibleToTexture(rotation);
+        var rect = new NormalizedRect(0.2f, 0.3f, 0.1f, 0.05f);
+        var expected = SurfaceOrientation.ToTextureSpace(rect, rotation);
+
+        // Map both opposite corners of the visible rect; their bounding box must equal the rect transform.
+        var a = origin + (rect.X * axisU) + (rect.Y * axisV);
+        var b = origin + (rect.Right * axisU) + (rect.Bottom * axisV);
+        var min = Vector2.Min(a, b);
+        var max = Vector2.Max(a, b);
+
+        AssertClose(expected, new NormalizedRect(min.X, min.Y, max.X - min.X, max.Y - min.Y));
+    }
+
+    [Fact]
+    public void TransformZones_PlacesZonesInsideTheLetterboxedContent()
+    {
+        // 2.39:1 film on a 16:9 screen: bars of 12.8% top and bottom.
+        var content = new NormalizedRect(0f, 0.128f, 1f, 0.744f);
+        var zones = ZoneLayoutBuilder.Build(new LedLayoutSettings { SampleDepth = 0.1f });
+        var transformed = new ZoneConfig[zones.Length];
+
+        SurfaceOrientation.TransformZones(zones.AsSpan(), content, ModeRotation.Identity, transformed);
+
+        Assert.All(transformed, zone =>
+        {
+            Assert.True(zone.Region.Y >= content.Y - 1e-6f, $"{zone.Region} starts in the top bar");
+            Assert.True(zone.Region.Bottom <= content.Bottom + 1e-6f, $"{zone.Region} reaches into the bottom bar");
+        });
+        var top = transformed.First(zone => zone.Edge == ScreenEdge.Top);
+        Assert.Equal(0.128f, top.Region.Y, precision: 5);
+        Assert.Equal(0.0744f, top.Region.Height, precision: 5);
     }
 
     [Fact]

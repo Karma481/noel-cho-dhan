@@ -1,7 +1,7 @@
 # System-wide Ambient Light — Kiến trúc nền móng
 
-> Trạng thái: **Phase 1 (Capture) hoàn tất** — Foundation + DXGI Desktop Duplication + GPU zone reduction.
-> Overlay/Processing/Serial/App được dựng ở các phase tiếp theo trên đúng các hợp đồng này. Chi tiết Phase 1: mục 7.
+> Trạng thái: **Phase 2 (Processing) hoàn tất** — Foundation + Capture (mục 7) + Processing & letterbox (mục 8).
+> Overlay/Serial/App được dựng ở các phase tiếp theo trên đúng các hợp đồng này.
 
 ---
 
@@ -167,18 +167,24 @@ noel-cho-dhan/
 │   │   ├── Threading/PrecisionTimer.cs, MmcssRegistration.cs
 │   │   ├── Interop/DisplayConfigInterop.cs, ThreadingInterop.cs
 │   │   └── Shaders/ZoneReduce.hlsl
-│   ├── AmbientLight.Processing/          Phase 2 — net10.0: pipeline màu CPU (thuần, test được)
+│   ├── AmbientLight.Processing/          ✅ net10.0 — xem mục 8
+│   │   ├── ColorProcessingService.cs       thread T2
+│   │   ├── Pipeline/ColorPipeline.cs, ColorPipelineParameters.cs, TemporalSmoother.cs, PowerLimiter.cs
+│   │   ├── Letterbox/LetterboxDetector.cs
+│   │   └── Color/ColorMath.cs, ColorTemperature.cs
 │   ├── AmbientLight.Overlay/             Phase 3 — net10.0-windows: Win32 layered window (CsWin32),
 │   │   └── Shaders/Glow.hlsl               DirectComposition + swapchain, WDA_EXCLUDEFROMCAPTURE
 │   ├── AmbientLight.Output.Serial/       Phase 4 — net10.0: Adalight encoder + writer, power limiter
 │   └── AmbientLight.App/                 Phase 5 — net10.0-windows WPF: tray, settings UI, composition root
 ├── tests/
 │   ├── AmbientLight.Core.Tests/          ✅ 38 test (xUnit v3 trên Microsoft.Testing.Platform)
-│   ├── AmbientLight.Capture.Tests/       ✅ 46 test — phần không cần GPU, chạy được cả trên Linux CI
-│   ├── AmbientLight.Processing.Tests/    Phase 2
+│   ├── AmbientLight.Capture.Tests/       ✅ phần không cần GPU, chạy được cả trên Linux CI
+│   ├── AmbientLight.Processing.Tests/    ✅ gồm test end-to-end đa luồng và test 0-allocation
 │   └── AmbientLight.Output.Serial.Tests/ Phase 4
 ├── benchmarks/
-│   └── AmbientLight.Benchmarks/          Phase 2 — BenchmarkDotNet, khẳng định 0 B allocated/frame
+│   └── AmbientLight.Benchmarks/          ✅ BenchmarkDotNet + MemoryDiagnoser (mục 8.5)
+├── tools/
+│   └── validate-shaders.sh               ✅ biên dịch mọi kernel bằng FXC thật (cs_5_0 /WX) + DXC
 └── firmware/
     └── esp32-adalight/                   Phase 4 — PlatformIO + FastLED, RMT output
 ```
@@ -283,3 +289,71 @@ giữ frame cho tới vòng sau; nếu vượt MaxFps thì ngủ bằng waitable
 - **Đã kiểm chứng:** build 0 warning; 46 test cho phân loại HRESULT (đối chiếu với hằng số thật của Vortice), back-off, toán xoay (kể cả nghịch đảo), ánh xạ màu, kích thước struct Win32, và *hợp đồng HLSL ↔ C#* (thứ tự field cbuffer, stride, các giá trị `#define`). Shader biên dịch sạch bằng DXC `-WX` (cs_6_0).
 - **Chưa kiểm chứng trên GPU thật:** môi trường phát triển là Linux, nên việc chạy trên Windows (FXC cs_5_0, duplication thực, fence, bind flags của surface) cần một lượt smoke test trên máy Windows có GPU.
 - **Cấp phát bộ nhớ:** Vortice tạo 2 wrapper COM nhỏ mỗi frame (`IDXGIResource` từ `AcquireNextFrame` và `ID3D11Texture2D` từ `QueryInterface`). Dưới 10 KB/s ở 60 fps → GC gen0 vài phút một lần, mỗi lần < 100 µs. Mục tiêu "0 B" ở mục 1.2 đúng cho mọi buffer dữ liệu, không đúng tuyệt đối cho các wrapper interop này.
+
+---
+
+## 8. Phase 2 — `AmbientLight.Processing` và letterbox detection
+
+### 8.1 Tương thích FXC `cs_5_0`
+
+Tại runtime, Vortice gọi `d3dcompiler_47.dll`, tức FXC. Vì vậy shader được kiểm bằng **chính `fxc.exe` của Windows SDK 10.0.28000** (chạy qua Wine trên Linux) với `/T cs_5_0 /Ges /WX`, xem `tools/validate-shaders.sh`.
+
+- Lượt kiểm đầu tiên **bắt được lỗi mà DXC bỏ sót**: cảnh báo X4000 "use of potentially uninitialized variable" ở các hàm có `return` sớm trong nhánh `if`. Tất cả helper đã viết lại theo kiểu single-exit. Hiện cả hai kernel biên dịch không một cảnh báo.
+- Đã đối chiếu bảng binding do FXC sinh ra: `CSMain` dùng `cb0`, `t0` (stride 24), `t1`, `s0`, `u0` (stride 16); `CSEdgeProfile` dùng `cb0`, `cb1`, `t1`, `s0`, `u1`.
+- Test hợp đồng còn chặn không cho đặt tên biến trùng keyword FXC (`line`, `point`, `triangle`, `sample`).
+
+### 8.2 Letterbox / pillarbox
+
+Màu của zone không đủ để phát hiện thanh đen: zone chỉ phủ 10% mép, còn thanh 21:9 trên 16:9 cao 12.8% mỗi bên. Vì vậy:
+
+```
+GPU  CSEdgeProfile: 256 hàng + 256 cột theo hướng nhìn thấy, mỗi đường 128 mẫu → độ sáng lớn nhất (2 KB)
+ │   (cùng lần submit và fence với CSMain, không thêm điểm đồng bộ)
+ ▼
+T2  LetterboxDetector → ContentBounds ──► SnapshotCell<NormalizedRect> ──► T1 co zone vào nội dung
+                                          (1 volatile read/frame; chỉ cấp phát khi thanh đen đổi)
+```
+
+| Quy tắc | Lý do |
+|---|---|
+| Mỗi trục đo bằng `min(trên, dưới)` | Phim luôn căn giữa. Bầu trời đêm chỉ làm *một* phía đen; phụ đề/logo chỉ làm *một* thanh sáng. |
+| Mở rộng crop sau 1.5 s ổn định | Cảnh tối thoáng qua không bị cắt nhầm. |
+| Thu hẹp crop **ngay lập tức** khi nội dung lấn vào *cả hai* thanh | Lấy mẫu bên trong nội dung luôn an toàn; lấy mẫu vào thanh đen làm LED tắt. |
+| Frame đen hoàn toàn: bỏ qua | Không mang thông tin. |
+| Thanh > 30%/phía: bỏ qua | Đó là cảnh tối, không phải thanh (2.76:1 trên 16:9 chỉ 17.7%). |
+| Dung sai ±2 đường | Mép thanh rơi giữa hai đường mẫu sẽ dao động 1 đường. |
+
+### 8.3 Pipeline màu
+
+```
+mẫu ─► black threshold ─► temporal smoothing ─► nhiệt độ màu ─► saturation ─► fit 0..1
+                                                                              │
+          ┌───────────────────────────────────────────────────────────────────┤
+          ▼                                                                   ▼
+  overlay: sRGB ─► DisplayColors          LED: white balance × brightness ─► sRGB ─► gamma LED ─► power limiter ─► LedColors
+```
+
+| Bước | Chi tiết |
+|---|---|
+| **Hai đầu ra** | `FrameData` có `LedColors` (wire-ready) và `DisplayColors` (sRGB cho màn hình). Cân trắng dải LED, độ sáng, gamma LED và giới hạn dòng **chỉ** áp cho LED; nếu áp cho overlay sẽ làm sai màu trên màn hình vốn đã được hiệu chỉnh. |
+| Nhiệt độ màu | Locus Planck (spline Kim et al.) → XYZ → sRGB tuyến tính, chuẩn hoá để 6500 K = (1,1,1) và kênh lớn nhất = 1 (không bao giờ đẩy kênh nào vượt mức). 2700 K → (1, 0.44, 0.10). |
+| Saturation | `Y + s·(c − Y)` quanh độ sáng của chính màu đó. Tự giảm `s` cho từng màu sát biên gamut để không kênh nào âm, nên giữ được sắc độ. Mặc định 1.2. |
+| Temporal smoothing | EMA với `α = 1 − e^(−Δt/τ)`, **không phụ thuộc frame rate** (đã test 10×10 ms = 1×100 ms). Mỗi bước bị chặn tối đa 0.1 s, nên sau một lúc màn hình tĩnh lâu thì chuyển cảnh vẫn fade thay vì nhảy cóc. Service tiếp tục tick khi chưa hội tụ, và render lại khi settings đổi trên màn hình tĩnh. |
+| Gamma LED | Mã hoá sRGB rồi `^LedGamma`, đúng như áp bảng gamma LED quen thuộc lên màu sRGB. Mặc định 2.2 gần như triệt tiêu, nên độ sáng LED tỉ lệ với ánh sáng thật của màn hình. |
+| Power limiter | `I = n·I_idle + Σ(R+G+B)/255 · mA_kênh`. Vượt ngân sách thì nhân mọi kênh với cùng hệ số (giữ sắc độ), dùng **số học nguyên chính xác** nên được *đảm bảo* không vượt (test 2000 frame ngẫu nhiên). **Bật mặc định 400 mA**, an toàn cho cổng USB 2.0. Phản ứng tức thời, không làm mượt, vì đây là cơ chế an toàn. |
+
+### 8.4 Zero-allocation
+
+- Mọi buffer (target, trạng thái smoothing, `FrameData` scratch, profile) cấp phát **một lần** cho 1024 zone. Slot của triple buffer chính là memory pool, được tái sử dụng vô hạn. Toàn bộ dùng `Span<T>` và `Vector3`; tham số settings là struct, chỉ tính lại khi snapshot đổi (so sánh tham chiếu).
+- Kiểm chứng: `ColorPipelineTests.SteadyState_AllocatesNothing` chạy 10.000 frame (letterbox đổi trạng thái liên tục) và assert `GC.GetAllocatedBytesForCurrentThread()` tăng **đúng 0 byte**.
+
+### 8.5 Benchmark (BenchmarkDotNet ShortRun, Xeon 2.1 GHz, .NET 10)
+
+| Phép đo | 100 LED | 1024 LED | Cấp phát |
+|---|---:|---:|---:|
+| `IngestAndRender` (toàn bộ pipeline) | 13.4 µs | 131 µs | 0 B |
+| `RenderOnly` (tick smoothing) | 13.1 µs | 129 µs | 0 B |
+| `LetterboxUpdate` (2 × 256 đường) | 0.04 µs | 0.04 µs | 0 B |
+| `PowerLimit` | 1.1 µs | 0.9 µs | 0 B |
+
+Ở 100 LED, 60 fps tốn khoảng 0.08% một nhân CPU. Chi phí chủ yếu là 6 phép `pow` mỗi zone (mã hoá sRGB cho hai đầu ra). Nếu sau này cần thì thay bằng LUT, nhưng hiện chưa cần.

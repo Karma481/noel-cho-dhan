@@ -12,6 +12,9 @@ public readonly record struct NormalizedRect(float X, float Y, float Width, floa
 {
     private const float Tolerance = 1e-5f;
 
+    /// <summary>The whole surface.</summary>
+    public static NormalizedRect Full => new(0f, 0f, 1f, 1f);
+
     /// <summary>Right edge (X + Width).</summary>
     public float Right => X + Width;
 
@@ -23,6 +26,17 @@ public readonly record struct NormalizedRect(float X, float Y, float Width, floa
         Width > 0f && Height > 0f &&
         X >= 0f && Y >= 0f &&
         Right <= 1f + Tolerance && Bottom <= 1f + Tolerance;
+
+    /// <summary>
+    /// Re-expresses this rectangle, given relative to <paramref name="container"/>, in the coordinates
+    /// <paramref name="container"/> itself uses. For example a zone covering the top 10% of the picture,
+    /// placed within the content area of a letterboxed movie, ends up just below the top black bar.
+    /// </summary>
+    public NormalizedRect Within(NormalizedRect container) => new(
+        container.X + (X * container.Width),
+        container.Y + (Y * container.Height),
+        Width * container.Width,
+        Height * container.Height);
 
     /// <summary>Converts to integer pixel bounds on a surface of the given size (left, top, right, bottom).</summary>
     public (int Left, int Top, int Right, int Bottom) ToPixels(int surfaceWidth, int surfaceHeight)

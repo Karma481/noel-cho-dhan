@@ -1,19 +1,35 @@
 // ZoneReduce.hlsl
 //
-// Reduces the duplicated desktop image to one linear-light color per LED zone.
+// Two compute kernels over the duplicated desktop image. Shader Model 5.0 (cs_5_0), compiled by FXC
+// through d3dcompiler_47.dll at runtime.
 //
-// Dispatch: one thread group per zone, Dispatch(ZoneCount, 1, 1).
-// Each group takes SamplesPerAxis x SamplesPerAxis bilinear samples spread evenly over the zone,
-// decodes them to linear light normalized to SDR reference white (1.0 = SDR white), averages them
-// with a parallel tree reduction in group-shared memory, then maps the average into the 0..1 LED
-// range (gamut clip + highlight roll-off for HDR).
+// CSMain — zone reduction. Dispatch(ZoneCount, 1, 1): one thread group per zone.
+//   Each group takes SamplesPerAxis x SamplesPerAxis bilinear samples spread evenly over the zone,
+//   decodes them to linear light normalized to SDR reference white (1.0 = SDR white), averages them
+//   with a parallel tree reduction in group-shared memory, then maps the average into the 0..1 LED
+//   range (gamut clip + highlight roll-off for HDR).
+//
+// CSEdgeProfile — luminance profile for letterbox / pillarbox detection.
+//   Dispatch(2 * PROFILE_RESOLUTION, 1, 1): groups [0, R) scan visible rows top to bottom, groups
+//   [R, 2R) scan visible columns left to right. Each group samples THREADS_PER_LINE points along its
+//   line and writes the brightest one's luma. A black bar is a run of lines whose brightest point is
+//   still black, which is what the CPU-side detector looks for.
 //
 // Averaging happens in linear light on purpose: averaging gamma-encoded values darkens mixed
 // regions (half black / half white would read as ~22% instead of 50% light).
 //
-// Bindings must match GpuZoneReducer.cs and ZoneReduceConstants.cs.
+// FXC compatibility rules followed throughout (verified with fxc.exe /T cs_5_0 /Ges /WX):
+//   - every function has a single exit (FXC reports X4000 "potentially uninitialized" on inlined
+//     functions that return from inside a branch);
+//   - group barriers only in uniform control flow;
+//   - no HLSL 2021 / SM6 features (no templates, no select(), no wave intrinsics, no 16-bit types);
+//   - no identifiers that are FXC keywords (line, point, triangle, sample).
+//
+// Bindings must match GpuZoneReducer.cs, ZoneReduceConstants.cs and EdgeProfileConstants.cs.
 
-#define THREADS_PER_ZONE 64
+#define THREADS_PER_ZONE    64
+#define THREADS_PER_LINE    128
+#define PROFILE_RESOLUTION  256
 
 // Values of ZoneReduceConstants.Encoding (SurfaceEncoding in C#).
 #define ENCODING_SRGB_UNORM      0  // 8-bit UNORM holding sRGB-encoded values (SDR desktop)
@@ -32,6 +48,17 @@ cbuffer ZoneReduceConstants : register(b0)
     float Reserved;
 };
 
+// Affine map from visible-desktop coordinates (what the user sees) to texture coordinates of the
+// duplicated surface, which is always in the panel's native orientation:
+// textureUv = TextureOrigin + u * TextureAxisU + v * TextureAxisV.
+cbuffer EdgeProfileConstants : register(b1)
+{
+    float2 TextureOrigin;
+    float2 TextureAxisU;
+    float2 TextureAxisV;
+    float2 ProfileReserved;
+};
+
 // Mirrors AmbientLight.Core.Zones.ZoneConfig (24 bytes). Region is already transformed from
 // visible-desktop space into desktop-texture space, so display rotation is handled on the CPU.
 struct Zone
@@ -41,12 +68,14 @@ struct Zone
     float4 Region; // x, y, width, height in normalized texture coordinates
 };
 
-StructuredBuffer<Zone>     Zones      : register(t0);
-Texture2D<float4>          Desktop    : register(t1);
+StructuredBuffer<Zone>     Zones       : register(t0);
+Texture2D<float4>          Desktop     : register(t1);
 SamplerState               LinearClamp : register(s0);
-RWStructuredBuffer<float4> ZoneColors : register(u0);
+RWStructuredBuffer<float4> ZoneColors  : register(u0);
+RWStructuredBuffer<float>  LineLuma    : register(u1);
 
 groupshared float3 PartialSums[THREADS_PER_ZONE];
+groupshared float  PartialPeaks[THREADS_PER_LINE];
 
 static const float3 Rec709Luma = float3(0.2126, 0.7152, 0.0722);
 
@@ -64,17 +93,17 @@ float3 SrgbToLinear(float3 encoded)
 // highlights) so that averaging stays physically correct; clipping happens once, after averaging.
 float3 DecodeTexel(float3 texel)
 {
+    float3 decoded = saturate(texel);
     if (Encoding == ENCODING_SCRGB_LINEAR)
     {
-        return texel / SdrWhiteScale;
+        decoded = texel / SdrWhiteScale;
     }
-
-    if (Encoding == ENCODING_LINEAR_SDR)
+    else if (Encoding == ENCODING_SRGB_UNORM)
     {
-        return saturate(texel);
+        decoded = SrgbToLinear(texel);
     }
 
-    return SrgbToLinear(texel);
+    return decoded;
 }
 
 // Brings colors outside the BT.709 gamut (negative components in scRGB) back inside by
@@ -83,18 +112,21 @@ float3 DecodeTexel(float3 texel)
 float3 GamutClip(float3 color)
 {
     float minimum = min(color.r, min(color.g, color.b));
-    if (minimum >= 0.0)
-    {
-        return color;
-    }
-
     float luma = dot(color, Rec709Luma);
-    if (luma <= 0.0)
+    float3 result = color;
+    if (minimum < 0.0)
     {
-        return float3(0.0, 0.0, 0.0);
+        if (luma > 0.0)
+        {
+            result = luma + (color - luma) * (luma / (luma - minimum));
+        }
+        else
+        {
+            result = float3(0.0, 0.0, 0.0);
+        }
     }
 
-    return luma + (color - luma) * (luma / (luma - minimum));
+    return result;
 }
 
 // Maps relative luminance [0, PeakWhite] into [0, 1] for the LEDs.
@@ -103,28 +135,30 @@ float3 GamutClip(float3 color)
 // Applied to the maximum channel and scaled uniformly so hue and saturation are preserved.
 float3 RollOffHighlights(float3 color)
 {
+    float3 result = saturate(color);
     float peak = max(color.r, max(color.g, color.b));
-    if (ToneMapEnabled == 0 || PeakWhite <= 1.0 || peak <= KneeStart)
+    if (ToneMapEnabled != 0 && PeakWhite > 1.0 && peak > KneeStart)
     {
-        return saturate(color);
+        float range = 1.0 - KneeStart;
+        float t = (peak - KneeStart) / range;
+        float tWhite = (PeakWhite - KneeStart) / range;
+        float compressed = t * (1.0 + t / (tWhite * tWhite)) / (1.0 + t);
+        float mapped = min(KneeStart + range * compressed, 1.0);
+        result = saturate(color * (mapped / peak));
     }
 
-    float range = 1.0 - KneeStart;
-    float t = (peak - KneeStart) / range;
-    float tWhite = (PeakWhite - KneeStart) / range;
-    float compressed = t * (1.0 + t / (tWhite * tWhite)) / (1.0 + t);
-    float mapped = min(KneeStart + range * compressed, 1.0);
-    return saturate(color * (mapped / peak));
+    return result;
 }
 
 float3 MapToLedRange(float3 linearColor)
 {
+    float3 result = saturate(linearColor);
     if (Encoding == ENCODING_SCRGB_LINEAR)
     {
-        return RollOffHighlights(GamutClip(linearColor));
+        result = RollOffHighlights(GamutClip(linearColor));
     }
 
-    return saturate(linearColor);
+    return result;
 }
 
 [numthreads(THREADS_PER_ZONE, 1, 1)]
@@ -165,5 +199,38 @@ void CSMain(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
     {
         float3 average = PartialSums[0] / (float)sampleCount;
         ZoneColors[zoneIndex] = float4(MapToLedRange(average), 1.0);
+    }
+}
+
+[numthreads(THREADS_PER_LINE, 1, 1)]
+void CSEdgeProfile(uint3 groupId : SV_GroupID, uint threadIndex : SV_GroupIndex)
+{
+    uint slot = groupId.x;
+    bool isRow = slot < PROFILE_RESOLUTION;
+    uint lineNumber = isRow ? slot : slot - PROFILE_RESOLUTION;
+
+    float across = ((float)lineNumber + 0.5) / (float)PROFILE_RESOLUTION;
+    float along = ((float)threadIndex + 0.5) / (float)THREADS_PER_LINE;
+    float2 visibleUv = isRow ? float2(along, across) : float2(across, along);
+    float2 textureUv = TextureOrigin + visibleUv.x * TextureAxisU + visibleUv.y * TextureAxisV;
+
+    float3 color = DecodeTexel(Desktop.SampleLevel(LinearClamp, textureUv, 0.0).rgb);
+    PartialPeaks[threadIndex] = dot(max(color, float3(0.0, 0.0, 0.0)), Rec709Luma);
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll]
+    for (uint stride = THREADS_PER_LINE / 2; stride > 0; stride >>= 1)
+    {
+        if (threadIndex < stride)
+        {
+            PartialPeaks[threadIndex] = max(PartialPeaks[threadIndex], PartialPeaks[threadIndex + stride]);
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if (threadIndex == 0)
+    {
+        LineLuma[slot] = PartialPeaks[0];
     }
 }

@@ -1,4 +1,5 @@
 using System.Numerics;
+using AmbientLight.Core.Zones;
 
 namespace AmbientLight.Core.Frames;
 
@@ -18,7 +19,14 @@ namespace AmbientLight.Core.Frames;
 /// </remarks>
 public sealed class ZoneSampleFrame : ICopyFrom<ZoneSampleFrame>
 {
+    /// <summary>
+    /// Lines per axis in the luminance profile; must equal <c>PROFILE_RESOLUTION</c> in ZoneReduce.hlsl.
+    /// 256 lines resolve a bar to 0.4% of the screen height (4 px at 1080p).
+    /// </summary>
+    public const int ProfileResolution = 256;
+
     private readonly Vector3[] _samples;
+    private readonly float[] _lineLuma = new float[ProfileResolution * 2];
 
     /// <summary>Creates a frame able to hold up to <paramref name="capacity"/> zones.</summary>
     public ZoneSampleFrame(int capacity)
@@ -44,6 +52,27 @@ public sealed class ZoneSampleFrame : ICopyFrom<ZoneSampleFrame>
 
     /// <summary>True when the desktop was captured as HDR (FP16 scRGB).</summary>
     public bool IsHdr { get; set; }
+
+    /// <summary>
+    /// The visible-desktop rectangle the zones were sampled within: the full screen, or the content area
+    /// below/between black bars when letterbox detection has cropped them away.
+    /// </summary>
+    public NormalizedRect ContentBounds { get; set; } = NormalizedRect.Full;
+
+    /// <summary>True when <see cref="RowLuma"/> and <see cref="ColumnLuma"/> hold this frame's profile.</summary>
+    public bool HasProfile { get; set; }
+
+    /// <summary>
+    /// Brightest linear luma (1.0 = SDR white) found along each visible row, top to bottom, over the whole
+    /// screen regardless of <see cref="ContentBounds"/>. Input to letterbox detection.
+    /// </summary>
+    public Span<float> RowLuma => _lineLuma.AsSpan(0, ProfileResolution);
+
+    /// <summary>Brightest linear luma along each visible column, left to right. Input to pillarbox detection.</summary>
+    public Span<float> ColumnLuma => _lineLuma.AsSpan(ProfileResolution, ProfileResolution);
+
+    /// <summary>Rows then columns, contiguous, exactly as the GPU writes them (2 x <see cref="ProfileResolution"/>).</summary>
+    public Span<float> LineLuma => _lineLuma;
 
     /// <summary>Number of valid zones.</summary>
     public int ZoneCount { get; private set; }
@@ -74,5 +103,11 @@ public sealed class ZoneSampleFrame : ICopyFrom<ZoneSampleFrame>
         SourceWidth = source.SourceWidth;
         SourceHeight = source.SourceHeight;
         IsHdr = source.IsHdr;
+        ContentBounds = source.ContentBounds;
+        HasProfile = source.HasProfile;
+        if (source.HasProfile)
+        {
+            source._lineLuma.CopyTo(_lineLuma, 0);
+        }
     }
 }

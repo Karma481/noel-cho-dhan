@@ -1,3 +1,4 @@
+using System.Numerics;
 using AmbientLight.Core.Zones;
 using Vortice.DXGI;
 
@@ -38,14 +39,34 @@ public static class SurfaceOrientation
         _ => visible,
     };
 
+    /// <summary>
+    /// The same mapping as <see cref="ToTextureSpace"/>, as an affine transform for shaders:
+    /// <c>texture = Origin + u * AxisU + v * AxisV</c> for a visible point (u, v).
+    /// </summary>
+    public static (Vector2 Origin, Vector2 AxisU, Vector2 AxisV) VisibleToTexture(ModeRotation rotation) => rotation switch
+    {
+        ModeRotation.Rotate90 => (new Vector2(0f, 1f), new Vector2(0f, -1f), new Vector2(1f, 0f)),
+        ModeRotation.Rotate180 => (new Vector2(1f, 1f), new Vector2(-1f, 0f), new Vector2(0f, -1f)),
+        ModeRotation.Rotate270 => (new Vector2(1f, 0f), new Vector2(0f, 1f), new Vector2(-1f, 0f)),
+        _ => (Vector2.Zero, Vector2.UnitX, Vector2.UnitY),
+    };
+
     /// <summary>Visible desktop size for a surface of the given texture size and rotation.</summary>
     public static (int Width, int Height) VisibleSize(int textureWidth, int textureHeight, ModeRotation rotation) =>
         rotation is ModeRotation.Rotate90 or ModeRotation.Rotate270
             ? (textureHeight, textureWidth)
             : (textureWidth, textureHeight);
 
-    /// <summary>Writes texture-space copies of <paramref name="zones"/> into <paramref name="destination"/>.</summary>
-    public static void TransformZones(ReadOnlySpan<ZoneConfig> zones, ModeRotation rotation, Span<ZoneConfig> destination)
+    /// <summary>
+    /// Writes texture-space copies of <paramref name="zones"/> into <paramref name="destination"/>. Each zone
+    /// is first placed within <paramref name="content"/> (the picture area between detected black bars, or
+    /// the full screen), then rotated into the surface's native orientation.
+    /// </summary>
+    public static void TransformZones(
+        ReadOnlySpan<ZoneConfig> zones,
+        NormalizedRect content,
+        ModeRotation rotation,
+        Span<ZoneConfig> destination)
     {
         if (destination.Length < zones.Length)
         {
@@ -55,7 +76,7 @@ public static class SurfaceOrientation
         for (var i = 0; i < zones.Length; i++)
         {
             var zone = zones[i];
-            destination[i] = zone with { Region = ToTextureSpace(zone.Region, rotation) };
+            destination[i] = zone with { Region = ToTextureSpace(zone.Region.Within(content), rotation) };
         }
     }
 }

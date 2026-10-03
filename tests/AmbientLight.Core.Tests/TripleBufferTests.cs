@@ -144,18 +144,18 @@ public sealed class TripleBufferTests
         using var broadcaster = new LatestValueBroadcaster<FrameData>(2, () => new FrameData(8));
         var source = new FrameData(8) { Sequence = 7 };
         source.SetZoneCount(2);
-        source.Colors[0] = new Color.ColorRgb(1, 2, 3);
-        source.Colors[1] = new Color.ColorRgb(4, 5, 6);
+        source.LedColors[0] = new Color.ColorRgb(1, 2, 3);
+        source.LedColors[1] = new Color.ColorRgb(4, 5, 6);
 
         broadcaster.Publish(source);
-        source.Colors[0] = Color.ColorRgb.White;
+        source.LedColors[0] = Color.ColorRgb.White;
 
         for (var i = 0; i < broadcaster.SubscriberCount; i++)
         {
             var mailbox = broadcaster.GetSubscriber(i);
             Assert.True(mailbox.TryAcquireLatest());
             Assert.Equal(7, mailbox.ReadSlot.Sequence);
-            Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6 }, mailbox.ReadSlot.ColorBytes.ToArray());
+            Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6 }, mailbox.ReadSlot.LedBytes.ToArray());
         }
 
         Assert.NotSame(broadcaster.GetSubscriber(0).ReadSlot, broadcaster.GetSubscriber(1).ReadSlot);

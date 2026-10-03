@@ -50,6 +50,7 @@ public sealed class DesktopCaptureService : IDisposable
 
     private readonly SettingsHolder _settings;
     private readonly LatestValueMailbox<ZoneSampleFrame> _output;
+    private readonly SnapshotCell<NormalizedRect> _contentBounds;
     private readonly ILogger<DesktopCaptureService> _logger;
     private readonly ManualResetEventSlim _stopSignal = new(initialState: false);
     private readonly Lock _lifecycleLock = new();
@@ -66,8 +67,10 @@ public sealed class DesktopCaptureService : IDisposable
     private GpuZoneReducer? _reducer;
     private CaptureSettings? _appliedCapture;
     private LedLayoutSettings? _appliedLayout;
+    private LetterboxSettings? _appliedLetterbox;
     private long _uploadedZonesVersion = -1;
     private ModeRotation _uploadedRotation;
+    private NormalizedRect _uploadedContent = NormalizedRect.Full;
     private bool _forceProcess;
     private long _lastProcessedTicks;
     private long _lastOutputRefreshTicks;
@@ -91,14 +94,20 @@ public sealed class DesktopCaptureService : IDisposable
     /// Mailbox read by the processing stage. Its frames must hold <see cref="LedLayoutSettings.MaxLedCount"/>
     /// zones; this service is its only producer.
     /// </param>
+    /// <param name="contentBounds">
+    /// Picture area between black bars, written by the processing stage's letterbox detector. Zones are
+    /// sampled within it while letterbox detection is enabled.
+    /// </param>
     /// <param name="logger">Diagnostics sink.</param>
     public DesktopCaptureService(
         SettingsHolder settings,
         LatestValueMailbox<ZoneSampleFrame> output,
+        SnapshotCell<NormalizedRect> contentBounds,
         ILogger<DesktopCaptureService> logger)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _output = output ?? throw new ArgumentNullException(nameof(output));
+        _contentBounds = contentBounds ?? throw new ArgumentNullException(nameof(contentBounds));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -369,11 +378,13 @@ public sealed class DesktopCaptureService : IDisposable
     {
         var capture = snapshot.Settings.Capture;
         var layout = snapshot.Settings.LedLayout;
+        var letterbox = snapshot.Settings.Letterbox;
         var firstApplication = _appliedCapture is null;
-        var changed = capture != _appliedCapture || layout != _appliedLayout;
+        var changed = capture != _appliedCapture || layout != _appliedLayout || letterbox != _appliedLetterbox;
 
         _appliedCapture = capture;
         _appliedLayout = layout;
+        _appliedLetterbox = letterbox;
 
         if (changed && !firstApplication)
         {
@@ -399,16 +410,25 @@ public sealed class DesktopCaptureService : IDisposable
     private void ReduceAndPublish(SettingsSnapshot snapshot, AcquiredFrame frame)
     {
         var capture = snapshot.Settings.Capture;
+        var letterboxEnabled = snapshot.Settings.Letterbox.Enabled;
         var zones = snapshot.Zones;
         var view = _duplicator!.GetSampleableView(out var surface);
         var rotation = _duplicator.Description.Rotation;
 
-        if (_uploadedZonesVersion != snapshot.Version || _uploadedRotation != rotation)
+        // One volatile read; the cell only changes when the detector confirms different bars.
+        var content = letterboxEnabled ? _contentBounds.Current.Value : NormalizedRect.Full;
+        if (!content.IsValid)
         {
-            SurfaceOrientation.TransformZones(zones.AsSpan(), rotation, _textureZones);
+            content = NormalizedRect.Full;
+        }
+
+        if (_uploadedZonesVersion != snapshot.Version || _uploadedRotation != rotation || _uploadedContent != content)
+        {
+            SurfaceOrientation.TransformZones(zones.AsSpan(), content, rotation, _textureZones);
             _reducer!.UploadZones(_textureZones.AsSpan(0, zones.Length));
             _uploadedZonesVersion = snapshot.Version;
             _uploadedRotation = rotation;
+            _uploadedContent = content;
         }
 
         var output = _device!.OutputInfo;
@@ -417,7 +437,8 @@ public sealed class DesktopCaptureService : IDisposable
 
         var slot = _output.WriteSlot;
         slot.SetZoneCount(zones.Length);
-        var gpuTime = _reducer!.Reduce(view, constants, slot.Samples);
+        var profile = letterboxEnabled ? slot.LineLuma : Span<float>.Empty;
+        var gpuTime = _reducer!.Reduce(view, constants, slot.Samples, EdgeProfileConstants.For(rotation), profile);
 
         var (width, height) = SurfaceOrientation.VisibleSize((int)surface.Width, (int)surface.Height, rotation);
         slot.Sequence = ++_sequence;
@@ -426,6 +447,8 @@ public sealed class DesktopCaptureService : IDisposable
         slot.SourceWidth = width;
         slot.SourceHeight = height;
         slot.IsHdr = mapping.Encoding == SurfaceEncoding.ScRgbLinear && output.IsHdr;
+        slot.ContentBounds = content;
+        slot.HasProfile = letterboxEnabled;
         _output.Publish();
 
         Interlocked.Increment(ref _framesPublished);
@@ -519,6 +542,7 @@ public sealed class DesktopCaptureService : IDisposable
 
         _appliedCapture = null;
         _appliedLayout = null;
+        _appliedLetterbox = null;
         _uploadedZonesVersion = -1;
         _lastProcessedTicks = 0;
     }
