@@ -238,8 +238,9 @@ public sealed class ColorProcessingService : IDisposable
         }
 
         var transitioning = _pipeline.Render(Stopwatch.GetTimestamp(), snapshot, _scratch);
-        _output.Publish(_scratch);
 
+        // Counters first: Interlocked is a full fence and Publish is an Interlocked exchange, so anyone who
+        // has received this frame is guaranteed to also see it counted.
         Interlocked.Increment(ref _framesPublished);
         if (_scratch.PowerLimitScale < 1f)
         {
@@ -247,6 +248,7 @@ public sealed class ColorProcessingService : IDisposable
         }
 
         Interlocked.Exchange(ref _lastProcessingTicks, Stopwatch.GetTimestamp() - started);
+        _output.Publish(_scratch);
         return transitioning;
     }
 }

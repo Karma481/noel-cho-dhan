@@ -449,11 +449,12 @@ public sealed class DesktopCaptureService : IDisposable
         slot.IsHdr = mapping.Encoding == SurfaceEncoding.ScRgbLinear && output.IsHdr;
         slot.ContentBounds = content;
         slot.HasProfile = letterboxEnabled;
-        _output.Publish();
 
+        // Counters before the hand-off, so a consumer that has the frame also sees it counted.
         Interlocked.Increment(ref _framesPublished);
         Interlocked.Exchange(ref _lastGpuReduceTicks, (long)(gpuTime.TotalSeconds * Stopwatch.Frequency));
         Volatile.Write(ref _encoding, (int)mapping.Encoding);
+        _output.Publish();
     }
 
     /// <summary>
