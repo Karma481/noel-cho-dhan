@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Stage T1 of the pipeline: DXGI Desktop Duplication + GPU zone reduction.
+    Produces ZoneSampleFrame values into a LatestValueMailbox owned by the processing stage.
+  -->
+  <PropertyGroup>
+    <!-- Plain -windows TFM: Win32/COM only, no WinRT projections. Minimum OS is checked at runtime (Windows 10 2004). -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>AmbientLight.Capture</RootNamespace>
+    <!-- LibraryImport source generation and the DisplayConfig structs need pointers. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Vortice.DXGI" />
+    <PackageReference Include="Vortice.Direct3D11" />
+    <PackageReference Include="Vortice.D3DCompiler" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AmbientLight.Core\AmbientLight.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Shaders\ZoneReduce.hlsl" LogicalName="AmbientLight.Capture.Shaders.ZoneReduce.hlsl" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AmbientLight.Capture.Tests" />
+  </ItemGroup>
+</Project>

@@ -1,7 +1,7 @@
 # System-wide Ambient Light — Kiến trúc nền móng
 
-> Trạng thái: **Phase 0 (Foundation)** — đã có kiểu dữ liệu dùng chung, primitive lock-free, settings, test.
-> Các project Windows (Capture/Overlay/Serial/App) được dựng ở các phase tiếp theo trên đúng các hợp đồng này.
+> Trạng thái: **Phase 1 (Capture) hoàn tất** — Foundation + DXGI Desktop Duplication + GPU zone reduction.
+> Overlay/Processing/Serial/App được dựng ở các phase tiếp theo trên đúng các hợp đồng này. Chi tiết Phase 1: mục 7.
 
 ---
 
@@ -42,7 +42,7 @@
  DWM compose ─► [T1] Capture & GPU Reduce ───────────────────────────────────────────┐
                  AcquireNextFrame (DXGI Desktop Duplication, blocking, 0% CPU khi chờ) │
                  CS: lấy mẫu N×N/zone, sRGB→linear, HDR tone-map, average             │
-                 ReleaseFrame ngay sau khi submit                                     │
+                 ReleaseFrame ngay trước lần acquire kế tiếp (GPU đã xong)            │
                  ID3D11Fence + event → Map staging (~1.6 KB)                          │
                        │                                                              │
                        ▼  LatestValueMailbox<ZoneSampleFrame>   (triple buffer, wait-free)
@@ -157,8 +157,16 @@ noel-cho-dhan/
 │   │   ├── Settings/AppSettings.cs, SettingsIssue.cs, AppSettingsJsonContext.cs,
 │   │   │            AppSettingsStore.cs, SettingsHolder.cs
 │   │   └── Threading/TripleBuffer.cs, LatestValueMailbox.cs, LatestValueBroadcaster.cs
-│   ├── AmbientLight.Capture/             Phase 1 — net10.0-windows: DXGI Desktop Duplication,
-│   │   └── Shaders/ZoneReduce.hlsl         compute shader reduce, fence readback, HDR
+│   ├── AmbientLight.Capture/             ✅ net10.0-windows — xem mục 7
+│   │   ├── DesktopCaptureService.cs        thread T1, vòng lặp, phục hồi phân tầng
+│   │   ├── CaptureStatus.cs, CaptureLog.cs
+│   │   ├── Duplication/DesktopDuplicator.cs, AcquiredFrame.cs
+│   │   ├── Gpu/CaptureDevice.cs, GpuZoneReducer.cs, ZoneReduceShader.cs, ZoneReduceConstants.cs
+│   │   ├── ColorSpace/ColorSpaceMapping.cs, DisplayOutputInfo.cs, SurfaceOrientation.cs
+│   │   ├── Recovery/CaptureRecovery.cs, RecoveryBackoff.cs
+│   │   ├── Threading/PrecisionTimer.cs, MmcssRegistration.cs
+│   │   ├── Interop/DisplayConfigInterop.cs, ThreadingInterop.cs
+│   │   └── Shaders/ZoneReduce.hlsl
 │   ├── AmbientLight.Processing/          Phase 2 — net10.0: pipeline màu CPU (thuần, test được)
 │   ├── AmbientLight.Overlay/             Phase 3 — net10.0-windows: Win32 layered window (CsWin32),
 │   │   └── Shaders/Glow.hlsl               DirectComposition + swapchain, WDA_EXCLUDEFROMCAPTURE
@@ -166,6 +174,7 @@ noel-cho-dhan/
 │   └── AmbientLight.App/                 Phase 5 — net10.0-windows WPF: tray, settings UI, composition root
 ├── tests/
 │   ├── AmbientLight.Core.Tests/          ✅ 38 test (xUnit v3 trên Microsoft.Testing.Platform)
+│   ├── AmbientLight.Capture.Tests/       ✅ 46 test — phần không cần GPU, chạy được cả trên Linux CI
 │   ├── AmbientLight.Processing.Tests/    Phase 2
 │   └── AmbientLight.Output.Serial.Tests/ Phase 4
 ├── benchmarks/
@@ -208,3 +217,69 @@ Yêu cầu môi trường: Windows 10 2004+ / Windows 11, GPU hỗ trợ D3D11.4
 dotnet build -c Release      # 0 warning là bắt buộc (TreatWarningsAsErrors)
 dotnet test  -c Release      # Microsoft.Testing.Platform
 ```
+
+---
+
+## 7. Phase 1 — `AmbientLight.Capture`
+
+### 7.1 Vòng đời một frame (thread T1)
+
+```
+ReleaseFrame(frame trước)  ← nhả ngay trước acquire, theo khuyến nghị của Microsoft
+AcquireNextFrame(timeout)  ── WAIT_TIMEOUT → màn hình tĩnh, không publish, consumer giữ màu cũ
+   │ LastPresentTime == 0  → chỉ con trỏ chuột di chuyển → bỏ qua GPU hoàn toàn
+   ▼
+SRV trực tiếp trên surface (nếu có BIND_SHADER_RESOURCE) │ hoặc CopyResource GPU→GPU sang texture riêng
+   ▼
+Dispatch(ZoneCount) ZoneReduce.hlsl → CopyResource → staging
+   ▼
+ID3D11Fence.Signal + Flush → chờ kernel event (0% CPU)    │ fallback: Map chặn nếu driver không có fence
+   ▼
+Map staging (16 B/zone) → ZoneSampleFrame.WriteSlot → mailbox.Publish()  (wait-free)
+   ▼
+giữ frame cho tới vòng sau; nếu vượt MaxFps thì ngủ bằng waitable timer độ phân giải cao
+```
+
+### 7.2 Phục hồi lỗi (`DxgiErrorClassifier`)
+
+| HRESULT | Nguyên nhân thực tế | Hành động |
+|---|---|---|
+| `DXGI_ERROR_WAIT_TIMEOUT` | Màn hình tĩnh | Không phải lỗi. Đếm `Timeouts`. |
+| `DXGI_ERROR_ACCESS_LOST` | Bật/tắt HDR, đổi độ phân giải/xoay, chuyển fullscreen exclusive | Tạo lại **chỉ duplication**, lần đầu ngay lập tức. Đọc lại thông tin output (HDR, xoay) trước khi tạo. |
+| `E_ACCESSDENIED`, `NOT_CURRENTLY_AVAILABLE`, `SESSION_DISCONNECTED`, `MODE_CHANGE_IN_PROGRESS` | UAC, màn hình khoá, Ctrl+Alt+Del, RDP ngắt, quá nhiều app duplicate | Trạng thái `WaitingForDesktop`, back-off 50 ms → 2 s, tự chạy lại khi khả dụng. |
+| `DEVICE_REMOVED/RESET/HUNG`, `DRIVER_INTERNAL_ERROR`, `NOT_FOUND`, fence timeout 500 ms | Cập nhật/crash driver, TDR, rút màn hình | Huỷ toàn bộ, liệt kê lại output, tạo lại device + reducer + duplication. |
+| Access lost lặp lại ≥ 5 lần liên tiếp | Output thật sự đã thay đổi | Leo thang lên tạo lại device. |
+| `UNSUPPORTED`, format lạ, lỗi lập trình | Cấu hình không hỗ trợ | `Faulted`, thử lại mỗi 2 s — không bao giờ thoát vòng lặp, nên cắm lại màn hình hay cài driver vẫn tự hồi phục. |
+
+Đổi settings capture hoặc layout LED → tạo lại duplication để frame đầu tiên chứa toàn bộ ảnh hiện tại, nên màn hình tĩnh vẫn nhận màu theo layout mới.
+
+### 7.3 Ánh xạ không gian màu HDR/SDR
+
+| Desktop | Format nhận về | Shader làm gì | Kết quả |
+|---|---|---|---|
+| SDR | `B8G8R8A8_UNorm` (sRGB-encoded) | Giải mã sRGB EOTF từng mẫu → tuyến tính | 0..1 tuyến tính |
+| HDR | `R16G16B16A16_Float` (scRGB, 1.0 = 80 nit, primaries BT.709) | Chia cho `SdrWhite/80` → trắng SDR = 1.0; trung bình; gamut clip; roll-off | 0..1 tuyến tính |
+| HDR, API cũ | `B8G8R8A8_UNorm` (DWM đã tone-map) | Như SDR | 0..1 tuyến tính |
+
+- **Trung bình trong không gian tuyến tính** (sau decode, trước clip): vùng nửa đen nửa trắng ra 50% ánh sáng thật, không phải ~22% như khi trung bình giá trị gamma.
+- **SDR white level** ("SDR content brightness" trong Windows) đọc qua CCD API `DISPLAYCONFIG_SDR_WHITE_LEVEL`, cập nhật mỗi 2 s vì kéo slider không gây access lost. Fallback 200 nit nếu Windows không trả về.
+- **Gamut clip**: màu ngoài BT.709 (thành phần âm trong scRGB) được khử bão hoà về độ sáng của chính nó, giữ độ sáng và gần đúng sắc độ thay vì lệch màu như clamp từng kênh.
+- **Roll-off highlight**: tuyến tính dưới knee 0.75; trên đó là extended Reinhard, **liên tục C1** tại knee và đạt đúng 1.0 tại độ sáng đỉnh EDID của màn hình (đã kiểm chứng số học). Hệ quả có chủ đích: trên desktop HDR, trắng SDR ra ≈ 0.88 để chừa chỗ phân biệt highlight; `Processing.Brightness` bù lại nếu cần. Tắt bằng `capture.hdrToneMapping = false` (khi đó cắt cứng ở trắng SDR).
+- **Xoay màn hình**: Desktop Duplication luôn trả surface theo hướng gốc của panel. Các hình chữ nhật zone được xoay trên CPU (`SurfaceOrientation`) một lần mỗi khi layout/xoay đổi, nên shader không có logic xoay.
+
+### 7.4 Quyết định đáng chú ý
+
+| Quyết định | Lý do |
+|---|---|
+| Device tạo trên **adapter sở hữu output**, không phải GPU mạnh nhất | Laptop hybrid (iGPU lái màn hình) sẽ trả `DXGI_ERROR_UNSUPPORTED` nếu sai adapter. |
+| `SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2)` trên thread capture | `DuplicateOutput1` (bắt buộc cho FP16/HDR) yêu cầu DPI awareness này; đặt ở thread nên không phụ thuộc manifest của app. Không được thì fallback `DuplicateOutput` (SDR). |
+| Đăng ký MMCSS task "Capture" + `ThreadPriority.AboveNormal` | Không bị game hay trình duyệt chiếm CPU làm đói thread. |
+| `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` cho throttle MaxFps | `Thread.Sleep` làm tròn lên 15.6 ms. Mốc throttle tính từ lúc acquire trừ 1 ms slack, nên không thêm trễ khi tần số quét = MaxFps. |
+| Biên dịch HLSL lúc chạy (`d3dcompiler_47.dll`, có sẵn trên Windows 10+) | HLSL là nguồn sự thật duy nhất; tốn vài chục ms một lần khi khởi động. |
+| Bộ đệm GPU cấp phát một lần cho 1024 zone | Đổi layout không bao giờ cấp phát lại bộ nhớ GPU. |
+
+### 7.5 Kiểm chứng và giới hạn
+
+- **Đã kiểm chứng:** build 0 warning; 46 test cho phân loại HRESULT (đối chiếu với hằng số thật của Vortice), back-off, toán xoay (kể cả nghịch đảo), ánh xạ màu, kích thước struct Win32, và *hợp đồng HLSL ↔ C#* (thứ tự field cbuffer, stride, các giá trị `#define`). Shader biên dịch sạch bằng DXC `-WX` (cs_6_0).
+- **Chưa kiểm chứng trên GPU thật:** môi trường phát triển là Linux, nên việc chạy trên Windows (FXC cs_5_0, duplication thực, fence, bind flags của surface) cần một lượt smoke test trên máy Windows có GPU.
+- **Cấp phát bộ nhớ:** Vortice tạo 2 wrapper COM nhỏ mỗi frame (`IDXGIResource` từ `AcquireNextFrame` và `ID3D11Texture2D` từ `QueryInterface`). Dưới 10 KB/s ở 60 fps → GC gen0 vài phút một lần, mỗi lần < 100 µs. Mục tiêu "0 B" ở mục 1.2 đúng cho mọi buffer dữ liệu, không đúng tuyệt đối cho các wrapper interop này.
