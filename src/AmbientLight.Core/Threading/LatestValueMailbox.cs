@@ -53,6 +53,13 @@ public sealed class LatestValueMailbox<T> : IDisposable
         return _buffer.TryAcquireLatest();
     }
 
+    /// <summary>
+    /// The auto-reset event signalled by <see cref="Publish"/> and <see cref="Wake"/>, for consumers that must
+    /// wait on it together with other handles, such as a Win32 message loop using
+    /// <c>MsgWaitForMultipleObjectsEx</c>. A satisfied wait resets it; follow it with <see cref="TryAcquireLatest"/>.
+    /// </summary>
+    public WaitHandle AvailableWaitHandle => _signal;
+
     /// <summary>Wakes a waiting consumer without publishing, for example to observe shutdown promptly.</summary>
     public void Wake() => _signal.Set();
 

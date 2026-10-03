@@ -1,7 +1,7 @@
 # System-wide Ambient Light — Kiến trúc nền móng
 
-> Trạng thái: **Phase 2 (Processing) hoàn tất** — Foundation + Capture (mục 7) + Processing & letterbox (mục 8).
-> Overlay/Serial/App được dựng ở các phase tiếp theo trên đúng các hợp đồng này.
+> Trạng thái: **Phase 3 (Overlay) hoàn tất** — Foundation + Capture (mục 7) + Processing & letterbox (mục 8) + Overlay (mục 9).
+> Serial/App được dựng ở các phase tiếp theo trên đúng các hợp đồng này.
 
 ---
 
@@ -112,7 +112,7 @@ Bằng chứng: test `ConcurrentProducerAndConsumer_NeverObserveTornOrStaleFrame
 
 | Rủi ro | Giải pháp |
 |---|---|
-| **Vòng phản hồi**: overlay nằm đúng vùng đang lấy mẫu → bị capture lại → màu tự khuếch đại | `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` (Win10 2004+). Phase Capture sẽ có test tích hợp xác minh overlay không xuất hiện trong frame duplication. |
+| **Vòng phản hồi**: overlay nằm đúng vùng đang lấy mẫu → bị capture lại → màu tự khuếch đại | `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` (Win10 2004+), **đọc lại để xác minh**. Không loại trừ được thì overlay **không bao giờ hiện** (mục 9.2). |
 | Video DRM (Netflix/Disney+ trong Edge/Chrome, PlayReady) | Desktop Duplication nhận vùng đen — giới hạn của OS. Ghi rõ trong UI; YouTube/trình duyệt thường và game không bị ảnh hưởng. |
 | Game exclusive fullscreen | Windows 10/11 chuyển phần lớn sang flip-model/FSO nên duplication vẫn hoạt động; LED vẫn chạy. Overlay không thể vẽ đè exclusive fullscreen thật. |
 | HDR | `IDXGIOutput5.DuplicateOutput1` với `R16G16B16A16_FLOAT` (scRGB), tone-map trong shader (`CaptureSettings.HdrToneMapping`). |
@@ -172,14 +172,18 @@ noel-cho-dhan/
 │   │   ├── Pipeline/ColorPipeline.cs, ColorPipelineParameters.cs, TemporalSmoother.cs, PowerLimiter.cs
 │   │   ├── Letterbox/LetterboxDetector.cs
 │   │   └── Color/ColorMath.cs, ColorTemperature.cs
-│   ├── AmbientLight.Overlay/             Phase 3 — net10.0-windows: Win32 layered window (CsWin32),
-│   │   └── Shaders/Glow.hlsl               DirectComposition + swapchain, WDA_EXCLUDEFROMCAPTURE
+│   ├── AmbientLight.Overlay/             ✅ net10.0-windows — xem mục 9
+│   │   ├── OverlayService.cs, OverlayLog.cs    thread T3 + message loop
+│   │   ├── Window/OverlayWindow.cs, OverlayWindowPolicy.cs, MonitorSelector.cs, MonitorEnumerator.cs
+│   │   ├── Rendering/GlowRenderer.cs, GlowGeometry.cs, RedrawTracker.cs
+│   │   └── Interop/User32.cs                   LibraryImport viết tay, kích thước struct chốt bằng test
 │   ├── AmbientLight.Output.Serial/       Phase 4 — net10.0: Adalight encoder + writer, power limiter
 │   └── AmbientLight.App/                 Phase 5 — net10.0-windows WPF: tray, settings UI, composition root
 ├── tests/
 │   ├── AmbientLight.Core.Tests/          ✅ 38 test (xUnit v3 trên Microsoft.Testing.Platform)
 │   ├── AmbientLight.Capture.Tests/       ✅ phần không cần GPU, chạy được cả trên Linux CI
 │   ├── AmbientLight.Processing.Tests/    ✅ gồm test end-to-end đa luồng và test 0-allocation
+│   ├── AmbientLight.Overlay.Tests/       ✅ style/affinity policy, chọn màn hình, hình học glow, redraw
 │   └── AmbientLight.Output.Serial.Tests/ Phase 4
 ├── benchmarks/
 │   └── AmbientLight.Benchmarks/          ✅ BenchmarkDotNet + MemoryDiagnoser (mục 8.5)
@@ -201,8 +205,8 @@ Quy tắc phụ thuộc (một chiều, không vòng): `App → {Capture, Proces
 | Vortice.Direct3D11 | 3.8.3 | Capture, Overlay | Compute shader, fence (`ID3D11Device5`), staging readback |
 | Vortice.D3DCompiler | 3.8.3 | Capture, Overlay | Biên dịch HLSL (cache bytecode `.cso`) |
 | Vortice.DirectComposition | 3.8.3 | Overlay | Visual tree trong suốt, upscale bilinear miễn phí |
+| Vortice.Direct2D1 | 3.8.3 | Overlay | Device context trên swapchain, hiệu ứng Gaussian Blur |
 | Vortice.Mathematics | 2.1.1 | Capture, Overlay | Kiểu vector/màu cho constant buffer |
-| Microsoft.Windows.CsWin32 | 0.3.346 | Overlay, App | P/Invoke source-gen: `CreateWindowEx`, `SetWindowDisplayAffinity`, `AvSetMmThreadCharacteristics` |
 | System.IO.Ports | 10.0.12 | Output.Serial | Cổng COM |
 | Microsoft.Extensions.Hosting | 10.0.12 | App | DI, lifetime, cấu hình |
 | Microsoft.Extensions.Logging.Abstractions | 10.0.12 | Các thư viện | `ILogger` không kéo theo host |
@@ -357,3 +361,69 @@ mẫu ─► black threshold ─► temporal smoothing ─► nhiệt độ màu
 | `PowerLimit` | 1.1 µs | 0.9 µs | 0 B |
 
 Ở 100 LED, 60 fps tốn khoảng 0.08% một nhân CPU. Chi phí chủ yếu là 6 phép `pow` mỗi zone (mã hoá sRGB cho hai đầu ra). Nếu sau này cần thì thay bằng LUT, nhưng hiện chưa cần.
+
+---
+
+## 9. Phase 3 — `AmbientLight.Overlay`
+
+### 9.1 Cửa sổ Win32
+
+| Yêu cầu | Hiện thực |
+|---|---|
+| Click xuyên qua | `WS_EX_LAYERED \| WS_EX_TRANSPARENT`, cộng thêm `WM_NCHITTEST → HTTRANSPARENT` để phòng hờ |
+| Không bao giờ giành focus | `WS_EX_NOACTIVATE`; mọi `SetWindowPos` đều có `SWP_NOACTIVATE`; `WM_MOUSEACTIVATE → MA_NOACTIVATE`; hiện bằng `SWP_SHOWWINDOW`, không bao giờ `SetForegroundWindow` |
+| Không xuất hiện ở taskbar / Alt+Tab | `WS_EX_TOOLWINDOW`, không có `WS_EX_APPWINDOW` |
+| Luôn trên cùng | `WS_EX_TOPMOST` + `HWND_TOPMOST`; **đặt lại khi app khác lên foreground** (WinEvent hook `EVENT_SYSTEM_FOREGROUND`), không dùng timer nên không "giành giật" với các cửa sổ topmost khác |
+| Không có bitmap GDI | `WS_EX_NOREDIRECTIONBITMAP`: nội dung duy nhất là visual DirectComposition, không tốn một bitmap toàn màn hình trong RAM |
+| Toạ độ vật lý | Thread overlay đặt DPI awareness per-monitor-v2 trước khi tạo cửa sổ |
+
+### 9.2 Loại trừ khỏi capture và fallback
+
+```
+Windows < 10.0.19041 ─────────────────► UnsupportedOperatingSystem ─┐
+SetWindowDisplayAffinity(0x11) thất bại ► Failed ─────────────────────┼─► cửa sổ luôn ẩn, status CaptureExclusionUnavailable,
+GetWindowDisplayAffinity ≠ 0x11 ───────► Failed ─────────────────────┘   LED vẫn chạy bình thường
+còn lại ─────────────────────────────────► Excluded ─► được phép hiện
+```
+
+`Show()` tự từ chối nếu chưa loại trừ được, nên không có đường code nào hiện overlay khi capture có thể nhìn thấy nó. `WDA_MONITOR` **không** dùng làm fallback được: nó tô đen cửa sổ trong ảnh capture, mà cửa sổ này phủ toàn màn hình, nên mọi frame capture sẽ đen hết.
+
+### 9.3 Render glow
+
+```
+OverlayWindowPolicy/GlowGeometry (CPU, 0 alloc)       GlowRenderer (D3D11 device riêng, trên adapter của màn hình đích)
+  zone + DisplayColors ─► dải màu không chồng nhau ─► canvas D2D (kích thước render + margin, aliased)
+                                                        ─► D2D Gaussian Blur (σ = blur radius / 3, border hard)
+                                                        ─► back buffer swapchain composition (1/8 độ phân giải)
+                                                        ─► Present(1) ─► Commit ─► DComp scale ×8, bilinear ─► DWM
+```
+
+| Tham số (`overlay.*`) | Mặc định | Ý nghĩa |
+|---|---|---|
+| `spreadFraction` | 0.04 | Spread width: độ dày dải màu đặc ở mỗi mép, tính theo phần cạnh ngắn màn hình (43 px ở 1080p, 86 px ở 4K) |
+| `blurRadiusFraction` | 0.08 | Blur radius: khoảng glow mờ dần vào trong; σ = radius/3 |
+| `opacity` | 0.85 | Độ đục tối đa |
+| `brightness` | 1.0 | Cường độ màu |
+| `resolutionDivisor` | 8 | Hệ số giảm độ phân giải khi render |
+
+Dùng tỉ lệ thay vì pixel nên glow trông như nhau trên màn 1080p và 4K.
+
+- **Không chồng lấn:** dải trên/dưới sở hữu các góc, dải trái/phải được cắt ngắn lại, nên không vùng nào bị blend alpha hai lần (góc sẽ không đậm hơn cạnh). Test kiểm từng cặp dải và kiểm cả vòng quanh màn hình: mỗi điểm được phủ đúng một lần.
+- **Kéo ra margin:** dải chạm mép màn hình được kéo dài ra vùng margin ngoài màn hình, nên blur ở mép "thấy" thêm cùng màu thay vì vùng trong suốt. Mô phỏng Gaussian 1D trong test: độ sáng sát mép tăng từ ~45% lên ~92% (giới hạn lý thuyết Φ(spread/σ) với cấu hình mặc định).
+- **Chỉ vẽ khi cần:** `RedrawTracker` so sánh byte (vector hoá) màu đã vẽ, layout, settings và danh sách zone. Không đổi thì không render, không `Present`. Đo bằng test: kiểm tra này 0 byte cấp phát.
+- **Không nhấp nháy khi resize:** `Commit` của DirectComposition được hoãn đến sau `Present` đầu tiên, nên DWM không bao giờ compose một swapchain chưa có nội dung. Cửa sổ chỉ hiện sau lần present thành công đầu tiên.
+- **Mất thiết bị** (`DEVICE_REMOVED/RESET/HUNG`, `D2DERR_RECREATE_TARGET`): chỉ dựng lại renderer, giữ nguyên cửa sổ.
+
+### 9.4 Đa màn hình
+
+- Màn hình được chọn **cùng quy tắc với Capture** (`capture.outputDeviceName`, null = primary), khớp theo tên GDI `\\.\DISPLAYn` mà cả DXGI lẫn `GetMonitorInfo` đều báo.
+- Cửa sổ đặt đúng `rcMonitor` trong toạ độ virtual screen, kể cả màn hình phụ có toạ độ âm.
+- `WM_DISPLAYCHANGE`, `WM_DPICHANGED`, `WM_SETTINGCHANGE` → liệt kê lại và đặt lại vị trí. Màn hình đích bị rút → ẩn overlay, thử lại mỗi 2 s, tự hiện lại khi cắm vào.
+- Đổi sang màn hình trên GPU khác → renderer được dựng lại trên adapter mới.
+
+### 9.5 Chi phí GPU và giới hạn
+
+- **Khi màu không đổi:** không render, không present. Chỉ còn chi phí cố định của DWM khi compose một texture nhỏ (480×270 ở 4K), phóng to bằng bilinear.
+- **Khi màu đổi:** một lần fill khoảng 100 hình chữ nhật và một lần blur trên canvas khoảng 526×316 px.
+- **Game fullscreen:** một cửa sổ topmost phủ lên game toàn màn hình có thể khiến DWM không dùng được *independent flip*, trừ khi GPU hỗ trợ multiplane overlay. Exclusive fullscreen thật thì che overlay hoàn toàn. Nếu cần, App (Phase 5) có thể thêm tuỳ chọn tự ẩn overlay khi app fullscreen đang ở foreground.
+- **Chưa kiểm chứng trên Windows thật:** sự kết hợp `WS_EX_LAYERED` + `WS_EX_NOREDIRECTIONBITMAP` + DirectComposition, việc `WDA_EXCLUDEFROMCAPTURE` loại cửa sổ khỏi Desktop Duplication, và hành vi topmost trên game borderless. Đây là các mục ưu tiên của lượt smoke test trên Windows.

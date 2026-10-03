@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Stage T3 of the pipeline: the click-through, capture-excluded, always-on-top glow window.
+    Win32 window + DirectComposition swapchain + Direct2D Gaussian blur on its own D3D11 device.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>AmbientLight.Overlay</RootNamespace>
+    <!-- Win32 structs with fixed buffers and function pointers for the window/event callbacks. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Vortice.DXGI" />
+    <PackageReference Include="Vortice.Direct3D11" />
+    <PackageReference Include="Vortice.Direct2D1" />
+    <PackageReference Include="Vortice.DirectComposition" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AmbientLight.Core\AmbientLight.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AmbientLight.Overlay.Tests" />
+  </ItemGroup>
+</Project>

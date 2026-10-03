@@ -103,3 +103,35 @@ public sealed class Phase2ContractTests
         Assert.Equal(SettingsIssueSeverity.Warning, issue.Severity);
     }
 }
+
+public sealed class Phase3ContractTests
+{
+    [Fact]
+    public void OverlaySettings_DefaultsAreValid_AndNewParametersAreRangeChecked()
+    {
+        Assert.Empty(new AppSettings().Validate());
+
+        var invalid = new AppSettings
+        {
+            Overlay = new OverlaySettings { SpreadFraction = 0f, BlurRadiusFraction = 0.5f, Brightness = 2f, Opacity = -0.1f },
+        };
+        var paths = invalid.Validate().Select(issue => issue.Path).ToHashSet();
+
+        Assert.Contains("overlay.spreadFraction", paths);
+        Assert.Contains("overlay.blurRadiusFraction", paths);
+        Assert.Contains("overlay.brightness", paths);
+        Assert.Contains("overlay.opacity", paths);
+    }
+
+    [Fact]
+    public void Mailbox_AvailableWaitHandle_IsSignalledByPublish_AndResetByTheWait()
+    {
+        using var mailbox = new LatestValueMailbox<FrameData>(() => new FrameData(4));
+
+        Assert.False(mailbox.AvailableWaitHandle.WaitOne(0));
+        mailbox.Publish();
+        Assert.True(mailbox.AvailableWaitHandle.WaitOne(0));
+        Assert.False(mailbox.AvailableWaitHandle.WaitOne(0));
+        Assert.True(mailbox.TryAcquireLatest());
+    }
+}

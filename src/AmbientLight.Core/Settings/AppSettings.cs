@@ -181,11 +181,25 @@ public sealed record OverlaySettings
     /// <summary>Whether the click-through glow overlay is shown.</summary>
     public bool Enabled { get; init; } = true;
 
-    /// <summary>Glow band thickness as a fraction of the shorter screen dimension.</summary>
-    public float ThicknessFraction { get; init; } = 0.06f;
+    /// <summary>
+    /// Spread width: thickness of the solid color band along each edge before blurring, as a fraction of
+    /// the shorter screen dimension (0.04 = 43 px on 1080p, 86 px on 4K). Fractions keep the look identical
+    /// on monitors of different resolution.
+    /// </summary>
+    public float SpreadFraction { get; init; } = 0.04f;
+
+    /// <summary>
+    /// Blur radius: how far the glow fades into the picture beyond the spread band, as a fraction of the
+    /// shorter screen dimension. Implemented as a Gaussian with standard deviation = radius / 3, so the
+    /// glow has faded out almost completely (99.7%) at the radius. 0 gives hard-edged bands.
+    /// </summary>
+    public float BlurRadiusFraction { get; init; } = 0.08f;
 
     /// <summary>Peak opacity of the glow at the screen edge, 0..1.</summary>
     public float Opacity { get; init; } = 0.85f;
+
+    /// <summary>Intensity of the glow colors, 0..1 (multiplies the sRGB color values; opacity is separate).</summary>
+    public float Brightness { get; init; } = 1f;
 
     /// <summary>
     /// The glow is rendered at 1/N of its on-screen size and upscaled bilinearly by DirectComposition.
@@ -195,8 +209,10 @@ public sealed record OverlaySettings
 
     internal void Validate(List<SettingsIssue> issues)
     {
-        RangeCheck.Float(issues, "overlay.thicknessFraction", ThicknessFraction, 0.005f, 0.25f);
+        RangeCheck.Float(issues, "overlay.spreadFraction", SpreadFraction, 0.005f, 0.25f);
+        RangeCheck.Float(issues, "overlay.blurRadiusFraction", BlurRadiusFraction, 0f, 0.25f);
         RangeCheck.Float(issues, "overlay.opacity", Opacity, 0f, 1f);
+        RangeCheck.Float(issues, "overlay.brightness", Brightness, 0f, 1f);
         RangeCheck.Int(issues, "overlay.resolutionDivisor", ResolutionDivisor, 1, 32);
     }
 }
