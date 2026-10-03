@@ -1,0 +1,10 @@
+{
+  "name": "AdalightCore",
+  "version": "1.0.0",
+  "description": "Hardware-independent Adalight protocol parser and idle watchdog fader. Unit-tested on the host (env:native).",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "flags": "-std=gnu++17"
+  }
+}

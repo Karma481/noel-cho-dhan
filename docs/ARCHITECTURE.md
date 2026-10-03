@@ -1,7 +1,7 @@
 # System-wide Ambient Light — Kiến trúc nền móng
 
-> Trạng thái: **Phase 3 (Overlay) hoàn tất** — Foundation + Capture (mục 7) + Processing & letterbox (mục 8) + Overlay (mục 9).
-> Serial/App được dựng ở các phase tiếp theo trên đúng các hợp đồng này.
+> Trạng thái: **Phase 4 (Serial + firmware) hoàn tất** — Foundation + Capture (mục 7) + Processing & letterbox (mục 8) + Overlay (mục 9) + Serial & ESP32 (mục 10).
+> App (composition root, UI) được dựng ở phase tiếp theo trên đúng các hợp đồng này.
 
 ---
 
@@ -15,7 +15,7 @@
 | GPU overhead | Như nhau | Như nhau | Do thiết kế shader/overlay quyết định, không do ngôn ngữ. |
 | Rủi ro jitter | GC pause | Không | Loại bỏ bằng **zero-allocation steady state** (buffer cấp phát trước) + `GCSettings.LatencyMode = SustainedLowLatency`. |
 | UI settings / tray | WPF + MVVM, rất nhanh | Win32/Qt/WinUI3 tốn công | ~60% code của app là UI, config, serial, logging. |
-| Serial, JSON, DI, logging | Có sẵn trong BCL | Thư viện ngoài | `System.IO.Ports`, `System.Text.Json` source-gen. |
+| Serial, JSON, DI, logging | Có sẵn trong BCL | Thư viện ngoài | Win32 comm API qua `LibraryImport` (mục 10), `System.Text.Json` source-gen. |
 | An toàn bộ nhớ / bảo trì | Cao | Thấp hơn | COM lifetime qua `IDisposable`, không UB. |
 | Interop DirectX | Vortice (SharpGen, mỏng, sát API gốc) | Native | Vortice 3.8.3 target `net10.0`, bao phủ DXGI 1.6, D3D11.4, DComp. |
 
@@ -177,23 +177,31 @@ noel-cho-dhan/
 │   │   ├── Window/OverlayWindow.cs, OverlayWindowPolicy.cs, MonitorSelector.cs, MonitorEnumerator.cs
 │   │   ├── Rendering/GlowRenderer.cs, GlowGeometry.cs, RedrawTracker.cs
 │   │   └── Interop/User32.cs                   LibraryImport viết tay, kích thước struct chốt bằng test
-│   ├── AmbientLight.Output.Serial/       Phase 4 — net10.0: Adalight encoder + writer, power limiter
+│   ├── AmbientLight.Serial/              ✅ net10.0-windows — xem mục 10
+│   │   ├── SerialOutputService.cs          thread T4
+│   │   ├── SerialOutputController.cs       state machine tất định: rate limit, keep-alive, reconnect
+│   │   ├── Protocol/AdalightEncoder.cs
+│   │   └── Ports/ISerialPort.cs, Win32SerialPort.cs, SerialErrorClassifier.cs
 │   └── AmbientLight.App/                 Phase 5 — net10.0-windows WPF: tray, settings UI, composition root
 ├── tests/
 │   ├── AmbientLight.Core.Tests/          ✅ 38 test (xUnit v3 trên Microsoft.Testing.Platform)
 │   ├── AmbientLight.Capture.Tests/       ✅ phần không cần GPU, chạy được cả trên Linux CI
 │   ├── AmbientLight.Processing.Tests/    ✅ gồm test end-to-end đa luồng và test 0-allocation
 │   ├── AmbientLight.Overlay.Tests/       ✅ style/affinity policy, chọn màn hình, hình học glow, redraw
-│   └── AmbientLight.Output.Serial.Tests/ Phase 4
+│   └── AmbientLight.Serial.Tests/        ✅ port giả: rút cáp, cổng bận, ghi treo, fuzz rò rỉ handle
 ├── benchmarks/
 │   └── AmbientLight.Benchmarks/          ✅ BenchmarkDotNet + MemoryDiagnoser (mục 8.5)
 ├── tools/
 │   └── validate-shaders.sh               ✅ biên dịch mọi kernel bằng FXC thật (cs_5_0 /WX) + DXC
 └── firmware/
-    └── esp32-adalight/                   Phase 4 — PlatformIO + FastLED, RMT output
+    └── esp32-adalight/                   ✅ PlatformIO + NeoPixelBus (RMT) — xem mục 10.3
+        ├── src/main.cpp                    keo nối phần cứng
+        ├── include/config.h                cấu hình build
+        ├── lib/AdalightCore/               parser + watchdog, C++17 thuần, không phụ thuộc Arduino
+        └── test/test_native/               unit test Unity chạy trên PC
 ```
 
-Quy tắc phụ thuộc (một chiều, không vòng): `App → {Capture, Processing, Overlay, Output.Serial} → Core`. Không project nào ngoài `App` được tham chiếu project anh em; chúng chỉ giao tiếp qua kiểu trong `Core`.
+Quy tắc phụ thuộc (một chiều, không vòng): `App → {Capture, Processing, Overlay, Serial} → Core`. Không project nào ngoài `App` được tham chiếu project anh em; chúng chỉ giao tiếp qua kiểu trong `Core`.
 
 ---
 
@@ -207,7 +215,6 @@ Quy tắc phụ thuộc (một chiều, không vòng): `App → {Capture, Proces
 | Vortice.DirectComposition | 3.8.3 | Overlay | Visual tree trong suốt, upscale bilinear miễn phí |
 | Vortice.Direct2D1 | 3.8.3 | Overlay | Device context trên swapchain, hiệu ứng Gaussian Blur |
 | Vortice.Mathematics | 2.1.1 | Capture, Overlay | Kiểu vector/màu cho constant buffer |
-| System.IO.Ports | 10.0.12 | Output.Serial | Cổng COM |
 | Microsoft.Extensions.Hosting | 10.0.12 | App | DI, lifetime, cấu hình |
 | Microsoft.Extensions.Logging.Abstractions | 10.0.12 | Các thư viện | `ILogger` không kéo theo host |
 | Serilog.Extensions.Hosting | 10.0.0 | App | Logging có cấu trúc |
@@ -427,3 +434,65 @@ Dùng tỉ lệ thay vì pixel nên glow trông như nhau trên màn 1080p và 4
 - **Khi màu đổi:** một lần fill khoảng 100 hình chữ nhật và một lần blur trên canvas khoảng 526×316 px.
 - **Game fullscreen:** một cửa sổ topmost phủ lên game toàn màn hình có thể khiến DWM không dùng được *independent flip*, trừ khi GPU hỗ trợ multiplane overlay. Exclusive fullscreen thật thì che overlay hoàn toàn. Nếu cần, App (Phase 5) có thể thêm tuỳ chọn tự ẩn overlay khi app fullscreen đang ở foreground.
 - **Chưa kiểm chứng trên Windows thật:** sự kết hợp `WS_EX_LAYERED` + `WS_EX_NOREDIRECTIONBITMAP` + DirectComposition, việc `WDA_EXCLUDEFROMCAPTURE` loại cửa sổ khỏi Desktop Duplication, và hành vi topmost trên game borderless. Đây là các mục ưu tiên của lượt smoke test trên Windows.
+
+---
+
+## 10. Phase 4 — `AmbientLight.Serial` và firmware ESP32
+
+### 10.1 Giao thức Adalight
+
+```
+'A' 'd' 'a'  count-hi  count-lo  checksum      R G B  R G B  ...
+              └── LED count − 1 ──┘  hi ^ lo ^ 0x55
+```
+
+Golden vector **dùng chung** cho test C# và test firmware: 3 LED đỏ, xanh lá, xanh dương = `41 64 61 00 02 57 FF 00 00 00 FF 00 00 00 FF`. Cả hai đầu còn kiểm công thức header cho đủ 65.536 giá trị count.
+
+### 10.2 Desktop (`AmbientLight.Serial`)
+
+**Vì sao không dùng `System.IO.Ports.SerialPort`:** trên Windows, mỗi lần `SerialStream.Write` cấp phát một async-result và một `NativeOverlapped`, nên không thể zero-allocation. Ngoài ra nó luôn chạy một thread `EventLoopRunner` nền, nguồn lỗi kinh điển khi rút cáp USB. `Win32SerialPort` gọi thẳng `CreateFile`/`SetCommState`/`SetCommTimeouts` và `WriteFile` đồng bộ từ span đã ghim: không cấp phát, không thread ẩn, handle là `SafeFileHandle` nên được đóng đúng một lần. DTR/RTS giữ ở trạng thái inactive, vì trên board ESP32 hai đường này điều khiển mạch auto-reset.
+
+| Cơ chế | Hiện thực |
+|---|---|
+| Non-blocking | Thread T4 riêng; `WriteFile` đồng bộ nhưng có comm write timeout = 2 × thời gian truyền frame lớn nhất + 100 ms (tối thiểu 200 ms). Các stage khác chỉ giao frame qua mailbox wait-free, nên serial chậm hay treo không ảnh hưởng gì tới chúng. |
+| Rate limit | ≤ `maxRefreshHz`; frame đến nhanh hơn được gộp, frame mới nhất thắng (không có hàng đợi). |
+| Keep-alive | Màn hình tĩnh: gửi lại frame cuối mỗi `keepAliveMs` (500 ms). Validation bắt buộc ≤ 1500 ms (¾ watchdog 2 s của firmware). |
+| Auto-reconnect | Mọi lỗi mở/ghi → dispose port **ngay lập tức** → thử lại với back-off 100 → 200 → 400 → 800 → 1000 ms (tối đa 1 s). Cắm lại cáp thì nhận lại trong ≤ 1 s và gửi ngay frame mới nhất. Baud bị driver từ chối → thử lại mỗi 5 s. |
+| Phân loại lỗi | `FILE_NOT_FOUND`/`DEVICE_NOT_CONNECTED` → `PortNotFound`; `ACCESS_DENIED` khi mở → `PortBusy` (app khác giữ cổng); mọi lỗi ghi, kể cả ghi thiếu do timeout → `Reconnecting`. Log chỉ khi trạng thái **chuyển**, nên poll lúc rút cáp không sinh spam. |
+| Zero-allocation | Buffer frame cấp phát một lần cho 1024 LED; encode ghi đè vào đó; keep-alive gửi lại nguyên buffer. Test: 10.000 bước (frame mới + keep-alive) cấp phát 0 byte. |
+| Thoát app | `blackoutOnStop` (mặc định bật) gửi một frame đen cùng số LED, rồi đóng cổng. |
+| Baud rate | Preset 115200, 460800, 921600, 1000000, 2000000; giá trị khác được chấp nhận kèm cảnh báo. |
+
+Logic nằm trong `SerialOutputController`, một state machine **tất định** nhận thời gian từ ngoài vào. Vì vậy test kiểm được chính xác từng ms của back-off, rate limit và keep-alive mà không cần `sleep`. Fuzz 5000 bước với lỗi ngẫu nhiên kiểm rằng không bao giờ có quá một handle mở cùng lúc, mọi port được dispose đúng một lần, và mọi lần ghi là một frame Adalight hợp lệ.
+
+Thời gian truyền (8N1): 100 LED @ 115200 = 26.6 ms (validation cảnh báo vì vượt chu kỳ 16.7 ms); @ 1 Mbaud = 3.1 ms; 300 LED @ 2 Mbaud = 4.5 ms.
+
+### 10.3 Firmware (`firmware/esp32-adalight`)
+
+```
+UART RX ISR ─► ring buffer 4 KB ─► loop(): đọc khối 256 B ─► AdalightParser ─► NeoPixelBus RMT ─► dải LED
+                                                                  │
+                                                     IdleFader (watchdog 2 s → fade 1 s)
+```
+
+| Yêu cầu | Hiện thực |
+|---|---|
+| WS2812B / SK6812 | `LED_TYPE_WS2812B` (mặc định), `LED_TYPE_SK6812_RGB`, `LED_TYPE_SK6812_RGBW` (tự tách kênh trắng, không mất thông tin) |
+| Xuất LED không nghẽn UART | NeoPixelBus với `NeoEsp32Rmt0*Method`: phần cứng RMT tạo dạng sóng, ngắt **không bị tắt** (driver bit-bang trên AVR phải tắt ngắt khoảng 9 ms cho 300 LED). Chỉ `Show()` khi `CanShow()`, nên `loop()` không bao giờ chờ. |
+| Không mất byte ở > 1 Mbaud | Ring buffer 4 KB (`setRxBufferSize` trước `begin`) = 20 ms dữ liệu ở 2 Mbaud |
+| State machine an toàn | Không dùng heap; checksum header; tìm lại magic ở mọi byte `A`; frame quá cỡ vẫn được đọc hết để giữ đồng bộ nhưng không ghi quá buffer (test dùng guard byte); frame dở dang quá 100 ms bị bỏ |
+| Watchdog | 2 s không có frame hợp lệ → fade bậc hai về đen trong 1 s; frame mới → sáng lại ngay; an toàn khi `millis()` quay vòng sau 49 ngày |
+
+**Đã kiểm chứng trong container:**
+
+- `pio test -e native`: **16/16** test Unity pass, biên dịch với `-Wall -Wextra -Werror`.
+- `pio run` với toolchain Xtensa thật (Arduino-ESP32 2.0.17, NeoPixelBus 2.8.4): **4 cấu hình build thành công, 0 warning**.
+
+| Cấu hình | RAM | Flash |
+|---|---|---|
+| ESP32 + WS2812B, 300 LED | 7.2% | 21.3% |
+| ESP32 + SK6812 RGB | 7.2% | 21.3% |
+| ESP32 + SK6812 RGBW, 1024 LED, 2 Mbaud | 8.6% | 21.3% |
+| ESP32-S3 USB-CDC native | 6.4% | 7.9% |
+
+**Chưa kiểm chứng:** nạp lên board thật, đo trên dải LED thật, và hành vi rút/cắm cáp trên driver CH340/CP210x/usbser thật.

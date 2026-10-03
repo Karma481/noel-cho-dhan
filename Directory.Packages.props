@@ -14,10 +14,6 @@
     <PackageVersion Include="Vortice.Mathematics" Version="2.1.1" />
   </ItemGroup>
 
-  <ItemGroup Label="LED output">
-    <PackageVersion Include="System.IO.Ports" Version="10.0.12" />
-  </ItemGroup>
-
   <ItemGroup Label="Hosting, logging, UI">
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />

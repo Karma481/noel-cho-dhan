@@ -233,6 +233,18 @@ public sealed record SerialSettings
     /// <summary>Bits on the wire per byte with 8N1 framing (start + 8 data + stop).</summary>
     public const int BitsPerByte8N1 = 10;
 
+    /// <summary>
+    /// Time without a frame after which the bundled ESP32 firmware fades the strip out. Keep-alives must
+    /// arrive well within it, which <see cref="KeepAliveMs"/>' upper bound guarantees.
+    /// </summary>
+    public const int FirmwareWatchdogMs = 2000;
+
+    /// <summary>
+    /// Baud rates the bundled firmware and common USB-UART bridges are tested with. Other values are
+    /// accepted with a warning, because the firmware must be built for exactly the same rate.
+    /// </summary>
+    public static IReadOnlyList<int> StandardBaudRates { get; } = [115_200, 460_800, 921_600, 1_000_000, 2_000_000];
+
     /// <summary>Whether frames are sent to the LED controller.</summary>
     public bool Enabled { get; init; }
 
@@ -251,8 +263,14 @@ public sealed record SerialSettings
     /// <summary>Maximum frames per second sent to the controller.</summary>
     public int MaxRefreshHz { get; init; } = 60;
 
-    /// <summary>The last frame is re-sent after this much idle time so the firmware's blank-on-timeout never fires.</summary>
+    /// <summary>
+    /// The last frame is re-sent after this much idle time (static screen) so the firmware's watchdog
+    /// (<see cref="FirmwareWatchdogMs"/>) never mistakes a still picture for a closed app.
+    /// </summary>
     public int KeepAliveMs { get; init; } = 500;
+
+    /// <summary>Send an all-black frame when the output stops, so the strip goes dark at once on exit.</summary>
+    public bool BlackoutOnStop { get; init; } = true;
 
     /// <summary>
     /// Current budget for the strip in milliamps; frames that would exceed it are dimmed uniformly.
@@ -283,8 +301,15 @@ public sealed record SerialSettings
         }
 
         RangeCheck.Int(issues, "serial.baudRate", BaudRate, 9_600, 12_000_000);
+        if (Enabled && !StandardBaudRates.Contains(BaudRate))
+        {
+            issues.Add(SettingsIssue.Warning(
+                "serial.baudRate",
+                string.Create(CultureInfo.InvariantCulture, $"{BaudRate} is not a standard rate ({string.Join(", ", StandardBaudRates)}); the firmware must be built for exactly this rate.")));
+        }
+
         RangeCheck.Int(issues, "serial.maxRefreshHz", MaxRefreshHz, 1, 240);
-        RangeCheck.Int(issues, "serial.keepAliveMs", KeepAliveMs, 50, 5_000);
+        RangeCheck.Int(issues, "serial.keepAliveMs", KeepAliveMs, 50, FirmwareWatchdogMs * 3 / 4);
         RangeCheck.Int(issues, "serial.maxCurrentMilliamps", MaxCurrentMilliamps, 0, 100_000);
         RangeCheck.Int(issues, "serial.milliampsPerChannel", MilliampsPerChannel, 1, 100);
         RangeCheck.Int(issues, "serial.idleMilliampsPerLed", IdleMilliampsPerLed, 0, 10);

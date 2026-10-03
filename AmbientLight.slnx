@@ -7,11 +7,13 @@
     <Project Path="src/AmbientLight.Core/AmbientLight.Core.csproj" />
     <Project Path="src/AmbientLight.Overlay/AmbientLight.Overlay.csproj" />
     <Project Path="src/AmbientLight.Processing/AmbientLight.Processing.csproj" />
+    <Project Path="src/AmbientLight.Serial/AmbientLight.Serial.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/AmbientLight.Capture.Tests/AmbientLight.Capture.Tests.csproj" />
     <Project Path="tests/AmbientLight.Core.Tests/AmbientLight.Core.Tests.csproj" />
     <Project Path="tests/AmbientLight.Overlay.Tests/AmbientLight.Overlay.Tests.csproj" />
     <Project Path="tests/AmbientLight.Processing.Tests/AmbientLight.Processing.Tests.csproj" />
+    <Project Path="tests/AmbientLight.Serial.Tests/AmbientLight.Serial.Tests.csproj" />
   </Folder>
 </Solution>
