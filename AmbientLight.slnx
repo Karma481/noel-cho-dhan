@@ -3,8 +3,10 @@
     <Project Path="benchmarks/AmbientLight.Benchmarks/AmbientLight.Benchmarks.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/AmbientLight.App/AmbientLight.App.csproj" />
     <Project Path="src/AmbientLight.Capture/AmbientLight.Capture.csproj" />
     <Project Path="src/AmbientLight.Core/AmbientLight.Core.csproj" />
+    <Project Path="src/AmbientLight.Host/AmbientLight.Host.csproj" />
     <Project Path="src/AmbientLight.Overlay/AmbientLight.Overlay.csproj" />
     <Project Path="src/AmbientLight.Processing/AmbientLight.Processing.csproj" />
     <Project Path="src/AmbientLight.Serial/AmbientLight.Serial.csproj" />
@@ -12,6 +14,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/AmbientLight.Capture.Tests/AmbientLight.Capture.Tests.csproj" />
     <Project Path="tests/AmbientLight.Core.Tests/AmbientLight.Core.Tests.csproj" />
+    <Project Path="tests/AmbientLight.Host.Tests/AmbientLight.Host.Tests.csproj" />
     <Project Path="tests/AmbientLight.Overlay.Tests/AmbientLight.Overlay.Tests.csproj" />
     <Project Path="tests/AmbientLight.Processing.Tests/AmbientLight.Processing.Tests.csproj" />
     <Project Path="tests/AmbientLight.Serial.Tests/AmbientLight.Serial.Tests.csproj" />

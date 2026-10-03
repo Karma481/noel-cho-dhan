@@ -27,8 +27,9 @@ public sealed class RecoveryBackoff
             return MaximumDelay;
         }
 
-        // Access lost is routine (every mode change) and usually recoverable at once.
-        if (_consecutiveFailures == 1 && recovery == CaptureRecovery.RecreateDuplication)
+        // Access lost is routine (every mode change) and usually recoverable at once; switching to another
+        // adapter is a different attempt altogether, not a repeat of the failed one.
+        if (_consecutiveFailures == 1 && recovery is CaptureRecovery.RecreateDuplication or CaptureRecovery.SwitchAdapter)
         {
             return TimeSpan.Zero;
         }

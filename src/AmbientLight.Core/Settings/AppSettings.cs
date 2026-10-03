@@ -39,6 +39,9 @@ public sealed record AppSettings
     /// <summary>Automatic black bar (letterbox / pillarbox) cropping.</summary>
     public LetterboxSettings Letterbox { get; init; } = new();
 
+    /// <summary>Power and performance behavior of the app as a whole.</summary>
+    public PerformanceSettings Performance { get; init; } = new();
+
     /// <summary>Validates every section and cross-section constraint.</summary>
     public IReadOnlyList<SettingsIssue> Validate()
     {
@@ -403,6 +406,25 @@ public sealed record LetterboxSettings
         RangeCheck.Int(issues, "letterbox.stableTimeMs", StableTimeMs, 0, 10_000);
         RangeCheck.Float(issues, "letterbox.maxBarFraction", MaxBarFraction, 0.05f, 0.45f);
     }
+}
+
+/// <summary>App-wide power and performance behavior.</summary>
+public sealed record PerformanceSettings
+{
+    /// <summary>
+    /// Hide the overlay and release its GPU resources while a game runs in exclusive fullscreen. DWM does not
+    /// compose over such a game, so the glow would be invisible anyway; when no LED strip is in use either,
+    /// capture and processing stop too.
+    /// </summary>
+    public bool PauseOverlayInExclusiveFullscreen { get; init; } = true;
+
+    /// <summary>
+    /// On laptops with an integrated and a discrete GPU, ask Windows to run this app on the power-saving GPU,
+    /// which is the one driving the built-in panel. Desktop Duplication refuses to run on the discrete GPU of a
+    /// hybrid laptop (DXGI_ERROR_UNSUPPORTED), and the integrated GPU also saves battery. A choice the user
+    /// already made in Windows Settings &gt; Display &gt; Graphics is never overwritten.
+    /// </summary>
+    public bool PreferPowerSavingGpu { get; init; } = true;
 }
 
 internal static class RangeCheck

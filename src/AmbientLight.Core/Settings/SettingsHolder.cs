@@ -38,6 +38,12 @@ public sealed class SettingsHolder
     public SettingsSnapshot Current => Volatile.Read(ref _current);
 
     /// <summary>
+    /// Raised on the publishing thread after a new snapshot became current. Pipeline threads never subscribe
+    /// (they poll <see cref="Current"/>); it is for the orchestrator and the UI.
+    /// </summary>
+    public event EventHandler<SettingsSnapshot>? Published;
+
+    /// <summary>
     /// Validates and publishes new settings. Returns <see langword="false"/> (and publishes nothing)
     /// when validation reports an error; warnings are returned but do not block publishing.
     /// </summary>
@@ -51,12 +57,14 @@ public sealed class SettingsHolder
         }
 
         var zones = ZoneLayoutBuilder.Build(settings.LedLayout);
+        SettingsSnapshot next;
         lock (_publishLock)
         {
-            var next = new SettingsSnapshot(settings, zones, _current.Version + 1);
+            next = new SettingsSnapshot(settings, zones, _current.Version + 1);
             Volatile.Write(ref _current, next);
         }
 
+        Published?.Invoke(this, next);
         return true;
     }
 

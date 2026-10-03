@@ -10,7 +10,7 @@ namespace AmbientLight.Overlay.Window;
 /// and match the duplicated surface the capture stage sees. Runs only on display changes, so the
 /// small allocations it makes are irrelevant.
 /// </remarks>
-internal static unsafe class MonitorEnumerator
+public static unsafe class MonitorEnumerator
 {
     /// <summary>Returns every monitor that is part of the desktop.</summary>
     public static IReadOnlyList<MonitorDescriptor> GetMonitors()

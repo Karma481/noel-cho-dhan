@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using AmbientLight.Capture.ColorSpace;
 using AmbientLight.Capture.Interop;
 using AmbientLight.Capture.Recovery;
@@ -25,6 +26,7 @@ internal sealed class CaptureDevice : IDisposable
 
     private CaptureDevice(
         string? requestedOutputName,
+        long adapterLuid,
         string adapterName,
         IDXGIOutput1 output1,
         IDXGIOutput5? output5,
@@ -33,6 +35,7 @@ internal sealed class CaptureDevice : IDisposable
         ID3D11DeviceContext context)
     {
         RequestedOutputName = requestedOutputName;
+        AdapterLuid = adapterLuid;
         _adapterName = adapterName;
         Output1 = output1;
         Output5 = output5;
@@ -46,6 +49,9 @@ internal sealed class CaptureDevice : IDisposable
 
     /// <summary>The <c>CaptureSettings.OutputDeviceName</c> this device was created for (null = primary).</summary>
     public string? RequestedOutputName { get; }
+
+    /// <summary>LUID of the adapter the device lives on, used to exclude it after DXGI_ERROR_UNSUPPORTED.</summary>
+    public long AdapterLuid { get; }
 
     public ID3D11Device Device { get; }
 
@@ -69,13 +75,14 @@ internal sealed class CaptureDevice : IDisposable
 
     /// <summary>
     /// Finds the requested monitor (GDI name, or the primary monitor when <see langword="null"/>) and creates
-    /// a device on its adapter.
+    /// a device on the first suitable adapter exposing it, in minimum-power order, skipping
+    /// <paramref name="excludedAdapters"/> (see <see cref="AdapterSelection"/>).
     /// </summary>
     /// <exception cref="CaptureException">The monitor does not exist or the device cannot be created.</exception>
-    public static CaptureDevice Create(string? requestedOutputName)
+    public static CaptureDevice Create(string? requestedOutputName, IReadOnlySet<long> excludedAdapters)
     {
         using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory1>();
-        var (adapter, output) = FindOutput(factory, requestedOutputName);
+        var (adapter, output) = FindOutput(factory, requestedOutputName, excludedAdapters);
 
         using (adapter)
         using (output)
@@ -98,9 +105,11 @@ internal sealed class CaptureDevice : IDisposable
             }
 
             var output1 = output.QueryInterface<IDXGIOutput1>();
+            var description = adapter.Description1;
             return new CaptureDevice(
                 requestedOutputName,
-                adapter.Description1.Description,
+                ToInt64(description.Luid),
+                description.Description,
                 output1,
                 output.QueryInterfaceOrNull<IDXGIOutput5>(),
                 output.QueryInterfaceOrNull<IDXGIOutput6>(),
@@ -139,32 +148,84 @@ internal sealed class CaptureDevice : IDisposable
         Output1.Dispose();
     }
 
-    private static (IDXGIAdapter1 Adapter, IDXGIOutput Output) FindOutput(IDXGIFactory1 factory, string? requestedOutputName)
-    {
-        for (uint adapterIndex = 0; factory.EnumAdapters1(adapterIndex, out var adapter).Success; adapterIndex++)
-        {
-            for (uint outputIndex = 0; adapter.EnumOutputs(outputIndex, out var output).Success; outputIndex++)
-            {
-                var description = output.Description;
-                if (description.AttachedToDesktop && IsMatch(description, requestedOutputName))
-                {
-                    return (adapter, output);
-                }
+    internal static long ToInt64(Vortice.Luid luid) => ((long)luid.HighPart << 32) | luid.LowPart;
 
+    private static (IDXGIAdapter1 Adapter, IDXGIOutput Output) FindOutput(
+        IDXGIFactory1 factory,
+        string? requestedOutputName,
+        IReadOnlySet<long> excludedAdapters)
+    {
+        var adapters = new List<IDXGIAdapter1>();
+        var outputs = new List<(int AdapterIndex, IDXGIOutput Output)>();
+        var candidates = new List<OutputCandidate>();
+        try
+        {
+            using var factory6 = factory.QueryInterfaceOrNull<IDXGIFactory6>();
+            for (uint index = 0; TryEnumAdapter(factory, factory6, index, out var adapter); index++)
+            {
+                adapters.Add(adapter);
+                var description = adapter.Description1;
+                var isSoftware = (description.Flags & AdapterFlags.Software) != 0;
+                for (uint outputIndex = 0; adapter.EnumOutputs(outputIndex, out var output).Success; outputIndex++)
+                {
+                    var outputDescription = output.Description;
+                    outputs.Add((adapters.Count - 1, output));
+                    candidates.Add(new OutputCandidate(
+                        ToInt64(description.Luid),
+                        isSoftware,
+                        outputDescription.DeviceName,
+                        outputDescription.AttachedToDesktop,
+                        outputDescription.DesktopCoordinates.Left == 0 && outputDescription.DesktopCoordinates.Top == 0));
+                }
+            }
+
+            var (selected, outcome) = AdapterSelection.Select(candidates, requestedOutputName, excludedAdapters);
+            var target = requestedOutputName ?? "the primary monitor";
+            switch (outcome)
+            {
+                case AdapterSelectionOutcome.NoMatchingOutput:
+                    throw new CaptureException($"No desktop-attached output matches {target}.", CaptureRecovery.RecreateDevice);
+                case AdapterSelectionOutcome.AllAdaptersExcluded:
+                    throw new CaptureException(
+                        $"Desktop Duplication is unsupported on every GPU exposing {target}. On a hybrid laptop, set " +
+                        "AmbientLight to 'Power saving' in Windows Settings > System > Display > Graphics.",
+                        CaptureRecovery.Fatal);
+            }
+
+            var (adapterIndex, selectedOutput) = outputs[selected];
+            var selectedAdapter = adapters[adapterIndex];
+
+            // Hand the chosen pair to the caller; everything else is released in the finally block.
+            outputs.RemoveAt(selected);
+            adapters.RemoveAt(adapterIndex);
+            return (selectedAdapter, selectedOutput);
+        }
+        finally
+        {
+            foreach (var (_, output) in outputs)
+            {
                 output.Dispose();
             }
 
-            adapter.Dispose();
+            foreach (var adapter in adapters)
+            {
+                adapter.Dispose();
+            }
         }
-
-        var target = requestedOutputName ?? "the primary monitor";
-        throw new CaptureException($"No desktop-attached output matches {target}.", CaptureRecovery.RecreateDevice);
     }
 
-    private static bool IsMatch(OutputDescription description, string? requestedOutputName) =>
-        requestedOutputName is null
-            ? description.DesktopCoordinates.Left == 0 && description.DesktopCoordinates.Top == 0
-            : string.Equals(description.DeviceName, requestedOutputName, StringComparison.OrdinalIgnoreCase);
+    /// <summary>Enumerates adapters integrated-GPU first when DXGI 1.6 is available, else in default order.</summary>
+    private static bool TryEnumAdapter(
+        IDXGIFactory1 factory,
+        IDXGIFactory6? factory6,
+        uint index,
+        [NotNullWhen(true)] out IDXGIAdapter1? adapter)
+    {
+        var result = factory6 is not null
+            ? factory6.EnumAdapterByGpuPreference(index, GpuPreference.MinimumPower, out adapter)
+            : factory.EnumAdapters1(index, out adapter);
+        return result.Success && adapter is not null;
+    }
 
     private DisplayOutputInfo ReadOutputInfo()
     {

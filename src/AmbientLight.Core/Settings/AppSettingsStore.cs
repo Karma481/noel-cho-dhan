@@ -12,11 +12,11 @@ public static class AppSettingsStore
         AllowTrailingCommas = true,
     };
 
-    /// <summary>Default location: <c>%LOCALAPPDATA%\AmbientLight\settings.json</c>.</summary>
+    /// <summary>Default location: <c>%LOCALAPPDATA%\AmbientLight\config.json</c>.</summary>
     public static string DefaultPath { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "AmbientLight",
-        "settings.json");
+        "config.json");
 
     /// <summary>Serializes settings to a JSON string.</summary>
     public static string Serialize(AppSettings settings)
@@ -108,6 +108,23 @@ public static class AppSettingsStore
 
         var temporaryPath = path + ".tmp";
         await File.WriteAllTextAsync(temporaryPath, Serialize(settings), cancellationToken).ConfigureAwait(false);
+        File.Move(temporaryPath, path, overwrite: true);
+    }
+
+    /// <summary>Synchronous <see cref="SaveAsync"/>, for timer callbacks and shutdown paths that must not return before the file is written.</summary>
+    public static void Save(string path, AppSettings settings)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(settings);
+
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var temporaryPath = path + ".tmp";
+        File.WriteAllText(temporaryPath, Serialize(settings));
         File.Move(temporaryPath, path, overwrite: true);
     }
 }

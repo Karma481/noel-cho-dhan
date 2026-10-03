@@ -281,10 +281,21 @@ internal sealed class GlowRenderer : IDisposable
         result.CheckError();
     }
 
+    // Integrated GPU first (minimum-power order, DXGI 1.6) so a hybrid laptop renders the glow on the GPU that
+    // drives the panel, which spares DWM a cross-adapter copy and keeps the discrete GPU asleep.
     private static IDXGIAdapter1? FindAdapter(IDXGIFactory1 factory, string monitorDeviceName)
     {
-        for (uint adapterIndex = 0; factory.EnumAdapters1(adapterIndex, out var adapter).Success; adapterIndex++)
+        using var factory6 = factory.QueryInterfaceOrNull<IDXGIFactory6>();
+        for (uint adapterIndex = 0; ; adapterIndex++)
         {
+            var enumerated = factory6 is not null
+                ? factory6.EnumAdapterByGpuPreference(adapterIndex, GpuPreference.MinimumPower, out IDXGIAdapter1? adapter)
+                : factory.EnumAdapters1(adapterIndex, out adapter);
+            if (enumerated.Failure || adapter is null)
+            {
+                return null;
+            }
+
             for (uint outputIndex = 0; adapter.EnumOutputs(outputIndex, out var output).Success; outputIndex++)
             {
                 using (output)
@@ -298,8 +309,6 @@ internal sealed class GlowRenderer : IDisposable
 
             adapter.Dispose();
         }
-
-        return null;
     }
 
     private void CreateSwapChain(int width, int height)

@@ -15,6 +15,7 @@ public sealed class LatestValueBroadcaster<T> : IDisposable
     where T : class, ICopyFrom<T>
 {
     private readonly LatestValueMailbox<T>[] _subscribers;
+    private readonly int[] _enabled;
 
     /// <summary>Creates <paramref name="subscriberCount"/> mailboxes whose slots come from <paramref name="slotFactory"/>.</summary>
     public LatestValueBroadcaster(int subscriberCount, Func<T> slotFactory)
@@ -23,9 +24,11 @@ public sealed class LatestValueBroadcaster<T> : IDisposable
         ArgumentNullException.ThrowIfNull(slotFactory);
 
         _subscribers = new LatestValueMailbox<T>[subscriberCount];
+        _enabled = new int[subscriberCount];
         for (var i = 0; i < subscriberCount; i++)
         {
             _subscribers[i] = new LatestValueMailbox<T>(slotFactory);
+            _enabled[i] = 1;
         }
     }
 
@@ -35,12 +38,27 @@ public sealed class LatestValueBroadcaster<T> : IDisposable
     /// <summary>The mailbox owned by consumer <paramref name="index"/>; hand each one to exactly one thread.</summary>
     public LatestValueMailbox<T> GetSubscriber(int index) => _subscribers[index];
 
-    /// <summary>Producer side: copies <paramref name="value"/> into every consumer's mailbox and publishes. Never blocks.</summary>
+    /// <summary>
+    /// Includes or skips consumer <paramref name="index"/> in future publishes. A consumer whose thread is not
+    /// running is disabled so the producer does not copy frames nobody will read. Safe from any thread.
+    /// </summary>
+    public void SetSubscriberEnabled(int index, bool enabled) => Volatile.Write(ref _enabled[index], enabled ? 1 : 0);
+
+    /// <summary>True when consumer <paramref name="index"/> receives publishes.</summary>
+    public bool IsSubscriberEnabled(int index) => Volatile.Read(ref _enabled[index]) != 0;
+
+    /// <summary>Producer side: copies <paramref name="value"/> into every enabled consumer's mailbox and publishes. Never blocks.</summary>
     public void Publish(T value)
     {
         ArgumentNullException.ThrowIfNull(value);
-        foreach (var subscriber in _subscribers)
+        for (var i = 0; i < _subscribers.Length; i++)
         {
+            if (Volatile.Read(ref _enabled[i]) == 0)
+            {
+                continue;
+            }
+
+            var subscriber = _subscribers[i];
             subscriber.WriteSlot.CopyFrom(value);
             subscriber.Publish();
         }

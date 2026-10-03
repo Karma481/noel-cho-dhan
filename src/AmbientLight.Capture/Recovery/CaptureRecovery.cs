@@ -36,6 +36,13 @@ public enum CaptureRecovery
     /// (driver install, monitor reconnect) is still picked up without restarting the app.
     /// </summary>
     Fatal = 4,
+
+    /// <summary>
+    /// Desktop Duplication is unsupported from this adapter: on a hybrid laptop the device was created on the
+    /// discrete GPU while the panel is driven by the integrated one. Exclude this adapter and rebuild the
+    /// device on another GPU that exposes the same monitor.
+    /// </summary>
+    SwitchAdapter = 5,
 }
 
 /// <summary>Maps HRESULTs from DXGI / D3D11 to a <see cref="CaptureRecovery"/> action.</summary>

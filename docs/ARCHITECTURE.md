@@ -148,7 +148,8 @@ noel-cho-dhan/
 ├── Directory.Packages.props              ✅ Central Package Management — mọi phiên bản ở một chỗ
 ├── .editorconfig / .gitignore            ✅
 ├── docs/
-│   └── ARCHITECTURE.md                   ✅ tài liệu này
+│   ├── ARCHITECTURE.md                   ✅ tài liệu này
+│   └── TESTING-WINDOWS.md                ✅ build, đóng gói và checklist test trên Windows
 ├── src/
 │   ├── AmbientLight.Core/                ✅ net10.0 — không phụ thuộc Windows, test được trên mọi OS
 │   │   ├── Color/ColorRgb.cs
@@ -182,17 +183,33 @@ noel-cho-dhan/
 │   │   ├── SerialOutputController.cs       state machine tất định: rate limit, keep-alive, reconnect
 │   │   ├── Protocol/AdalightEncoder.cs
 │   │   └── Ports/ISerialPort.cs, Win32SerialPort.cs, SerialErrorClassifier.cs
-│   └── AmbientLight.App/                 Phase 5 — net10.0-windows WPF: tray, settings UI, composition root
+│   ├── AmbientLight.Host/                ✅ net10.0-windows, không phụ thuộc UI — xem mục 11
+│   │   ├── Pipeline/PipelinePlan.cs, PipelineStages.cs, PipelineOrchestrator.cs, PipelineServices.cs, StatusText.cs
+│   │   ├── Settings/SettingsCoordinator.cs, SettingsFormValues.cs
+│   │   ├── Platform/StartupRegistration.cs, GpuPreferenceRegistration.cs, FullscreenMonitor.cs,
+│   │   │            SingleInstance.cs, RegistryValueStore.cs
+│   │   └── AppPaths.cs, HostLog.cs
+│   └── AmbientLight.App/                 ✅ net10.0-windows WPF, AssemblyName AmbientLight — xem mục 11
+│       ├── App.xaml(.cs), AppHost.cs, AppLog.cs   composition root, vòng đời
+│       ├── Tray/TrayIconController.cs              H.NotifyIcon, menu Settings / Pause / Exit
+│       ├── Interop/HotkeyManager.cs                RegisterHotKey trên message-only window
+│       ├── Settings/SettingsWindow.xaml(.cs), SettingsViewModel.cs
+│       ├── Themes/Controls.xaml                    theme sáng gọn kiểu Windows 11
+│       ├── Assets/AmbientLight.ico, AmbientLight-paused.ico
+│       ├── Properties/PublishProfiles/win-x64.pubxml
+│       └── app.manifest                            PerMonitorV2, asInvoker, Windows 10/11
 ├── tests/
 │   ├── AmbientLight.Core.Tests/          ✅ 38 test (xUnit v3 trên Microsoft.Testing.Platform)
 │   ├── AmbientLight.Capture.Tests/       ✅ phần không cần GPU, chạy được cả trên Linux CI
 │   ├── AmbientLight.Processing.Tests/    ✅ gồm test end-to-end đa luồng và test 0-allocation
 │   ├── AmbientLight.Overlay.Tests/       ✅ style/affinity policy, chọn màn hình, hình học glow, redraw
-│   └── AmbientLight.Serial.Tests/        ✅ port giả: rút cáp, cổng bận, ghi treo, fuzz rò rỉ handle
+│   ├── AmbientLight.Serial.Tests/        ✅ port giả: rút cáp, cổng bận, ghi treo, fuzz rò rỉ handle
+│   └── AmbientLight.Host.Tests/          ✅ orchestrator với stage giả, config với đồng hồ giả, registry in-memory
 ├── benchmarks/
 │   └── AmbientLight.Benchmarks/          ✅ BenchmarkDotNet + MemoryDiagnoser (mục 8.5)
 ├── tools/
-│   └── validate-shaders.sh               ✅ biên dịch mọi kernel bằng FXC thật (cs_5_0 /WX) + DXC
+│   ├── validate-shaders.sh               ✅ biên dịch mọi kernel bằng FXC thật (cs_5_0 /WX) + DXC
+│   └── generate-icons.py                 ✅ vẽ icon .ico bằng SDF, chỉ dùng thư viện chuẩn Python
 └── firmware/
     └── esp32-adalight/                   ✅ PlatformIO + NeoPixelBus (RMT) — xem mục 10.3
         ├── src/main.cpp                    keo nối phần cứng
@@ -201,7 +218,7 @@ noel-cho-dhan/
         └── test/test_native/               unit test Unity chạy trên PC
 ```
 
-Quy tắc phụ thuộc (một chiều, không vòng): `App → {Capture, Processing, Overlay, Serial} → Core`. Không project nào ngoài `App` được tham chiếu project anh em; chúng chỉ giao tiếp qua kiểu trong `Core`.
+Quy tắc phụ thuộc (một chiều, không vòng): `App → Host → {Capture, Processing, Overlay, Serial} → Core`. Bốn stage không tham chiếu lẫn nhau, chỉ giao tiếp qua kiểu trong `Core`. `Host` là nơi duy nhất ghép chúng lại và không biết gì về WPF, nên toàn bộ logic điều phối được test trên Linux.
 
 ---
 
@@ -215,13 +232,14 @@ Quy tắc phụ thuộc (một chiều, không vòng): `App → {Capture, Proces
 | Vortice.DirectComposition | 3.8.3 | Overlay | Visual tree trong suốt, upscale bilinear miễn phí |
 | Vortice.Direct2D1 | 3.8.3 | Overlay | Device context trên swapchain, hiệu ứng Gaussian Blur |
 | Vortice.Mathematics | 2.1.1 | Capture, Overlay | Kiểu vector/màu cho constant buffer |
-| Microsoft.Extensions.Hosting | 10.0.12 | App | DI, lifetime, cấu hình |
 | Microsoft.Extensions.Logging.Abstractions | 10.0.12 | Các thư viện | `ILogger` không kéo theo host |
-| Serilog.Extensions.Hosting | 10.0.0 | App | Logging có cấu trúc |
-| Serilog.Sinks.File | 7.0.0 | App | Log file xoay vòng |
-| CommunityToolkit.Mvvm | 8.4.2 | App | MVVM source-gen cho UI settings |
+| Microsoft.Extensions.Logging | 10.0.12 | App | `ILoggerFactory` |
+| Serilog / Serilog.Extensions.Logging | 4.4.0 / 10.0.0 | App | Logging có cấu trúc qua `ILogger` |
+| Serilog.Sinks.File | 7.0.0 | App | Log file xoay vòng theo ngày, giữ 7 ngày, tối đa 5 MB/file |
+| CommunityToolkit.Mvvm | 8.4.2 | App | `ObservableObject`, `RelayCommand` cho Settings |
 | H.NotifyIcon.Wpf | 2.4.1 | App | Icon khay hệ thống |
 | xunit.v3 | 4.0.1 | tests | Test framework (chạy native trên Microsoft.Testing.Platform) |
+| Microsoft.Extensions.TimeProvider.Testing | 10.10.0 | tests | `FakeTimeProvider` cho test debounce/polling không cần `sleep` |
 | BenchmarkDotNet | 0.15.8 | benchmarks | Đo latency & allocation |
 
 Yêu cầu môi trường: Windows 10 2004+ / Windows 11, GPU hỗ trợ D3D11.4 (feature level 11_0), .NET 10 SDK, Visual Studio 2026 hoặc Rider 2025.3+.
@@ -233,6 +251,7 @@ Yêu cầu môi trường: Windows 10 2004+ / Windows 11, GPU hỗ trợ D3D11.4
 ```bash
 dotnet build -c Release      # 0 warning là bắt buộc (TreatWarningsAsErrors)
 dotnet test  -c Release      # Microsoft.Testing.Platform
+dotnet publish src/AmbientLight.App -p:PublishProfile=win-x64   # → artifacts/publish/win-x64/AmbientLight.exe
 ```
 
 ---
@@ -266,7 +285,8 @@ giữ frame cho tới vòng sau; nếu vượt MaxFps thì ngủ bằng waitable
 | `E_ACCESSDENIED`, `NOT_CURRENTLY_AVAILABLE`, `SESSION_DISCONNECTED`, `MODE_CHANGE_IN_PROGRESS` | UAC, màn hình khoá, Ctrl+Alt+Del, RDP ngắt, quá nhiều app duplicate | Trạng thái `WaitingForDesktop`, back-off 50 ms → 2 s, tự chạy lại khi khả dụng. |
 | `DEVICE_REMOVED/RESET/HUNG`, `DRIVER_INTERNAL_ERROR`, `NOT_FOUND`, fence timeout 500 ms | Cập nhật/crash driver, TDR, rút màn hình | Huỷ toàn bộ, liệt kê lại output, tạo lại device + reducer + duplication. |
 | Access lost lặp lại ≥ 5 lần liên tiếp | Output thật sự đã thay đổi | Leo thang lên tạo lại device. |
-| `UNSUPPORTED`, format lạ, lỗi lập trình | Cấu hình không hỗ trợ | `Faulted`, thử lại mỗi 2 s — không bao giờ thoát vòng lặp, nên cắm lại màn hình hay cài driver vẫn tự hồi phục. |
+| `UNSUPPORTED` từ `DuplicateOutput` | Laptop hybrid: device nằm trên dGPU trong khi iGPU lái màn hình | `SwitchAdapter` (Phase 5): loại LUID adapter đó, thử ngay adapter kế tiếp cùng xuất ra màn hình này. Hết adapter → `Faulted` với hướng dẫn chọn "Power saving", xoá danh sách loại trừ và thử lại sau 2 s. |
+| Format lạ, lỗi lập trình | Cấu hình không hỗ trợ | `Faulted`, thử lại mỗi 2 s — không bao giờ thoát vòng lặp, nên cắm lại màn hình hay cài driver vẫn tự hồi phục. |
 
 Đổi settings capture hoặc layout LED → tạo lại duplication để frame đầu tiên chứa toàn bộ ảnh hiện tại, nên màn hình tĩnh vẫn nhận màu theo layout mới.
 
@@ -288,7 +308,7 @@ giữ frame cho tới vòng sau; nếu vượt MaxFps thì ngủ bằng waitable
 
 | Quyết định | Lý do |
 |---|---|
-| Device tạo trên **adapter sở hữu output**, không phải GPU mạnh nhất | Laptop hybrid (iGPU lái màn hình) sẽ trả `DXGI_ERROR_UNSUPPORTED` nếu sai adapter. |
+| Device tạo trên **adapter sở hữu output**, duyệt theo thứ tự tiết kiệm điện (`EnumAdapterByGpuPreference(MinimumPower)`), không phải GPU mạnh nhất | Laptop hybrid (iGPU lái màn hình) sẽ trả `DXGI_ERROR_UNSUPPORTED` nếu sai adapter. Xem mục 11.3. |
 | `SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2)` trên thread capture | `DuplicateOutput1` (bắt buộc cho FP16/HDR) yêu cầu DPI awareness này; đặt ở thread nên không phụ thuộc manifest của app. Không được thì fallback `DuplicateOutput` (SDR). |
 | Đăng ký MMCSS task "Capture" + `ThreadPriority.AboveNormal` | Không bị game hay trình duyệt chiếm CPU làm đói thread. |
 | `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` cho throttle MaxFps | `Thread.Sleep` làm tròn lên 15.6 ms. Mốc throttle tính từ lúc acquire trừ 1 ms slack, nên không thêm trễ khi tần số quét = MaxFps. |
@@ -496,3 +516,114 @@ UART RX ISR ─► ring buffer 4 KB ─► loop(): đọc khối 256 B ─► Ad
 | ESP32-S3 USB-CDC native | 6.4% | 7.9% |
 
 **Chưa kiểm chứng:** nạp lên board thật, đo trên dải LED thật, và hành vi rút/cắm cáp trên driver CH340/CP210x/usbser thật.
+
+---
+
+## 11. Phase 5 — `AmbientLight.Host` + `AmbientLight.App`
+
+### 11.1 Thành phần
+
+| Project | Lớp | Vai trò |
+|---|---|---|
+| Host | `PipelinePlan` | Hàm thuần: từ settings + pause + fullscreen suy ra stage nào chạy |
+| Host | `PipelineOrchestrator` | Reconcile mỗi khi settings/pause/fullscreen đổi; start/stop theo thứ tự an toàn |
+| Host | `PipelineServices` | Mailbox, broadcaster, 4 service thật và adapter `IPipelineStage` của chúng |
+| Host | `SettingsCoordinator` | Đọc/sửa `config.json` lúc khởi động, autosave có debounce |
+| Host | `StartupRegistration`, `GpuPreferenceRegistration` | Run key, StartupApproved, UserGpuPreferences (HKCU, không cần admin) |
+| Host | `FullscreenMonitor`, `SingleInstance`, `StatusText` | Phát hiện exclusive fullscreen, một instance/phiên, chuỗi trạng thái cho UI |
+| App | `AppHost` | Composition root: tạo theo thứ tự, huỷ theo thứ tự ngược lại |
+| App | `TrayIconController`, `HotkeyManager` | Tray (Settings / Pause–Resume / Exit), Ctrl+Alt+L và Ctrl+Alt+O |
+| App | `SettingsWindow` + `SettingsViewModel` | 3 tab, áp dụng tức thì, footer trạng thái trực tiếp |
+
+`Host` không tham chiếu WPF, nên orchestrator, config, registry và fullscreen được test trên Linux bằng stage giả, `FakeTimeProvider` và registry in-memory.
+
+### 11.2 Stage nào chạy khi nào
+
+| Tình huống | Capture | Processing | Overlay | Serial | Mode |
+|---|:-:|:-:|:-:|:-:|---|
+| **Mặc định trên laptop** (overlay bật, LED tắt) | ✔ | ✔ | ✔ | — | Running |
+| Overlay + LED | ✔ | ✔ | ✔ | ✔ | Running |
+| Game exclusive fullscreen, chỉ overlay | — | — | — | — | SuspendedForFullscreen |
+| Game exclusive fullscreen + LED | ✔ | ✔ | — | ✔ | Running (overlay suspended) |
+| Overlay tắt và LED tắt | — | — | — | — | Idle |
+| Pause (tray, nút Pause, Ctrl+Alt+L) | — | — | — | — | Paused |
+
+- **LED tắt thì Serial bằng không:** `SerialOutputService` chỉ được tạo ở lần bật đầu tiên. Khi `serial.enabled = false` (mặc định trong `config.json`) không có object, thread hay handle COM nào.
+- **Không có consumer thì không capture:** Paused, Idle hay fullscreen chỉ có overlay đều dừng cả T1 và T2. Duplication và D3D device được giải phóng, nên GPU và CPU của app về 0.
+- **Thứ tự:** dừng producer trước (Capture → Processing → Overlay → Serial), nên frame đen của LED là thứ cuối cùng gửi đi; khởi động consumer trước (Serial → Overlay → Processing → Capture), nên frame đầu tiên đã có người đọc.
+- **Broadcaster:** subscriber của overlay (0) và serial (1) chỉ được bật khi stage tương ứng chạy, nên processing không sao chép frame cho output đã dừng.
+- **Idempotent:** kéo slider phát ra hàng chục snapshot; mỗi lần chỉ tốn một phép so sánh plan, không start/stop và không phát event.
+- **Lỗi:** stage không start được (ví dụ Windows < 2004) được ghi vào `LastError` hiển thị trên header Settings và thử lại ở lần reconcile kế tiếp. Stage không dừng kịp (timeout 5 s) vẫn được tính là đang chạy và được dừng lại lần sau.
+
+Exclusive fullscreen dùng `SHQueryUserNotificationState == QUNS_RUNNING_D3D_FULL_SCREEN`, poll 1 lần/giây và chỉ báo chuyển trạng thái sau **2 lần đọc giống nhau**, nên Alt+Tab qua lại không làm overlay bị dựng lại liên tục. Game borderless (`QUNS_BUSY`) vẫn giữ overlay vì DWM vẫn compose được.
+
+### 11.3 Laptop hai GPU (iGPU + dGPU)
+
+Màn hình laptop nối vào iGPU. `DuplicateOutput` gọi từ device trên dGPU trả `DXGI_ERROR_UNSUPPORTED`. App xử lý bằng ba lớp, không lớp nào làm crash app:
+
+1. **Thứ tự liệt kê:** capture và overlay đều duyệt adapter bằng `IDXGIFactory6::EnumAdapterByGpuPreference(MinimumPower)`, nên iGPU được thử trước. Adapter phần mềm (Basic Render Driver) và output không gắn desktop bị bỏ qua (`AdapterSelection`, có test).
+2. **Tự chuyển adapter:** `UNSUPPORTED` → `CaptureRecovery.SwitchAdapter` → LUID adapter đó bị loại, lần thử kế tiếp chạy ngay trên adapter khác cũng xuất ra màn hình này. Hết adapter → `Faulted` kèm hướng dẫn, danh sách loại trừ được xoá và thử lại sau 2 s.
+3. **Ưu tiên của Windows:** lúc khởi động app ghi `HKCU\Software\Microsoft\DirectX\UserGpuPreferences` → `"<đường dẫn exe>" = "GpuPreference=1;"` (Power saving) **chỉ khi chưa có lựa chọn nào**. Lựa chọn người dùng đặt trong Settings › System › Display › Graphics không bao giờ bị ghi đè; các mục khác trong cùng giá trị (`SwapEffectUpgradeEnable=1;`) được giữ nguyên. Windows áp dụng từ lần chạy sau. Có thể tắt bằng `performance.preferPowerSavingGpu`.
+
+### 11.4 Cấu hình và lưu trữ
+
+- File: `%LOCALAPPDATA%\AmbientLight\config.json`. Lần chạy đầu ghi đủ giá trị mặc định, trong đó `"serial": { "enabled": false }`.
+- **Đọc:** section sai (ví dụ `overlay.opacity = 5`) → chỉ section đó về mặc định, các section khác giữ nguyên. JSON hỏng → về mặc định. Cả hai trường hợp đều sao lưu bản gốc thành `config.invalid-<yyyyMMdd-HHmmss>.json` trước khi ghi lại và báo bằng notification. File bị khoá → dùng mặc định và **tắt autosave** cho phiên đó, để không bao giờ ghi đè file chưa đọc được.
+- **Ghi:** mỗi thay đổi được publish ngay cho pipeline. File được ghi sau 750 ms yên lặng (một lần cho cả cú kéo slider), ghi atomic bằng file tạm rồi đổi tên, và flush khi thoát. Lỗi ghi được báo ở footer và thử lại ở lần thay đổi sau.
+- **UI:** không có nút Save/Apply. Thay đổi không hợp lệ (bật LED khi chưa chọn COM port) giữ nguyên trong form, lý do hiện ở footer, và được áp dụng ngay khi hợp lệ. Nếu chỉ có đúng một cổng COM thì bật LED sẽ tự chọn cổng đó.
+- **Start with Windows** không nằm trong `config.json`, vì nguồn sự thật là registry: `HKCU\…\Run\AmbientLight = "<exe>" --autostart`. Trạng thái tắt trong Task Manager (`StartupApproved\Run`, byte đầu lẻ) được nhận ra và hiển thị; bật lại trong app sẽ xoá cờ tắt đó. Nếu exe bị di chuyển và đường dẫn cũ không còn tồn tại, entry tự trỏ sang vị trí mới.
+
+### 11.5 Tray, hotkey, một instance
+
+| Tính năng | Hiện thực |
+|---|---|
+| Menu chuột phải | **Settings…**, **Pause/Resume effect** (Ctrl+Alt+L), **Exit**; double-click mở Settings |
+| Icon và tooltip | Icon xám khi không ở trạng thái Running; tooltip ghi trạng thái (≤ 127 ký tự) |
+| Efficiency mode | `ForceCreate(false)`: H.NotifyIcon mặc định bật EcoQoS cho app ẩn, điều đó sẽ bóp thread capture và overlay |
+| Taskbar chưa sẵn sàng | Không tạo được tray icon (Explorer chưa chạy hoặc đang restart) → app vẫn chạy, thử lại mỗi 5 s |
+| Hotkey | `RegisterHotKey` trên message-only window, `MOD_NOREPEAT`: Ctrl+Alt+L pause/resume, Ctrl+Alt+O overlay on/off. Tổ hợp bị app khác chiếm thì hiện ở footer. |
+| Một instance | Mutex `Local\AmbientLight.Instance`. Chạy exe lần nữa → instance đang chạy mở Settings (có `AllowSetForegroundWindow`). `--exit` → instance đang chạy thoát có kiểm soát. |
+| Tham số | `--autostart` (khởi động im lặng trong tray), `--exit`, `--verbose` (log Debug) |
+| Log | `%LOCALAPPDATA%\AmbientLight\logs\ambientlight-<ngày>.log`, xoay vòng theo ngày, giữ 7 file, tối đa 5 MB/file |
+
+### 11.6 Chi phí khi chạy
+
+- Mặc định trên laptop: 3 thread pipeline (T1, T2, T3) cộng UI thread. Pause, Idle hoặc fullscreen chỉ có overlay: 0 thread pipeline.
+- GC workstation, non-concurrent (`ConcurrentGarbageCollection=false`): pipeline không cấp phát mỗi frame, nên thread background GC chỉ tốn RAM.
+- Footer Settings poll trạng thái 1 lần/giây và **chỉ khi cửa sổ đang mở**. Đóng cửa sổ thì ViewModel và timer được huỷ.
+- Exe **không nén**: bundle nén phải giải nén vào RAM riêng ở mỗi lần chạy, cộng thêm hàng chục MB suốt vòng đời app tray. Assembly không nén được map thẳng từ file exe.
+
+### 11.7 Đóng gói
+
+```powershell
+dotnet publish src/AmbientLight.App -p:PublishProfile=win-x64
+# → artifacts/publish/win-x64/AmbientLight.exe (một file duy nhất)
+```
+
+| Thuộc tính (win-x64.pubxml) | Giá trị | Ghi chú |
+|---|---|---|
+| `SelfContained` | true | Không cần cài .NET |
+| `PublishSingleFile` | true | Một file exe, không có pdb/xml đi kèm (symbol embedded) |
+| `PublishReadyToRun` | true | Native code biên dịch sẵn, khởi động nhanh lúc đăng nhập |
+| `IncludeNativeLibrariesForSelfExtract` | true | DLL native của WPF nằm trong exe, giải nén một lần vào `%TEMP%\.net\AmbientLight` |
+| `EnableCompressionInSingleFile` | false | Ưu tiên RAM (mục 11.6); muốn file nhỏ hơn thì thêm `-p:EnableCompressionInSingleFile=true` |
+
+Kết quả trong container: `AmbientLight.exe` 157 MB, `PE32+ executable (GUI) x86-64`.
+
+`App` đặt `InvariantGlobalization=false` (khác phần còn lại của repo). Trong invariant mode, WPF ném `Cannot find non-neutral culture related to 'en-us'` ngay khi binding và layout chữ, tức app không mở nổi cửa sổ nào. Lỗi này được phát hiện khi chạy thử dưới Wine (mục 11.8).
+
+### 11.8 Kiểm chứng trong container
+
+- `dotnet build -c Release`: 0 warning. `dotnet test`: **374/374** pass. Phase 5 thêm 122 test: Host 112, Capture 7 (`AdapterSelection`), Core 3 (cờ subscriber của broadcaster, event `Published`, mặc định cho laptop).
+- **Chạy thật dưới Wine 9 + Xvfb** (bản publish dạng thư mục, vì Wine không map được bundle single-file), thao tác bằng `xdotool`:
+  - Cả 3 tab Settings render đúng. Ctrl+Alt+L pause/resume (log cho thấy dừng Capture → Processing → Overlay trong vài ms). Ctrl+Alt+O tắt overlay thì pipeline về Idle.
+  - Slider và 30 FPS được autosave vào `config.json`. Bật Start with Windows ghi đúng Run key. GPU preference được ghi `GpuPreference=1;`.
+  - Bật LED tự chọn COM1 do Wine giả lập, kết nối ở 1.000.000 baud; tắt LED thì thread serial dừng.
+  - Chạy exe lần hai mở lại Settings; `--exit` thoát có kiểm soát; `--autostart` không mở cửa sổ.
+  - Wine không hỗ trợ `WDA_EXCLUDEFROMCAPTURE`, và overlay **tự ẩn đúng như thiết kế**, footer giải thích lý do.
+- **Lỗi tìm ra nhờ Wine và đã sửa:**
+  1. Invariant globalization làm WPF không chạy được.
+  2. `TaskbarIcon` tự dispose `Icon` cũ khi đổi icon, nên lần Resume đầu tiên sẽ crash nếu dùng chung một đối tượng `Icon`.
+  3. Không tạo được tray icon thì app từ chối khởi động.
+  4. `FontWeight` của TabItem lan xuống toàn bộ nội dung tab.
+- **Chưa kiểm chứng được** (cần Windows thật có GPU): Desktop Duplication, DirectComposition, `WDA_EXCLUDEFROMCAPTURE` có hiệu lực, tray thật (tray của Wine thiếu `NIM_SETVERSION`), và laptop hybrid. Checklist ở [TESTING-WINDOWS.md](TESTING-WINDOWS.md).

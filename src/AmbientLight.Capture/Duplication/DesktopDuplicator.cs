@@ -179,6 +179,14 @@ internal sealed class DesktopDuplicator : IDisposable
             UsesLegacyApi = true;
             return _device.Output1.DuplicateOutput(device);
         }
+        catch (SharpGenException exception) when (exception.ResultCode.Code == DxgiResult.Unsupported.Code)
+        {
+            // Both APIs refuse this adapter: the classic hybrid-laptop case of a device on the discrete GPU while
+            // the integrated GPU drives the panel. Another adapter exposing the same monitor may work.
+            throw new CaptureException(
+                $"Desktop Duplication is not supported from '{_device.OutputInfo.AdapterName}'.",
+                CaptureRecovery.SwitchAdapter);
+        }
         catch (SharpGenException exception)
         {
             throw new CaptureException($"DuplicateOutput failed: {exception.ResultCode}", exception);

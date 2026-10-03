@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The tray application: composition root, tray icon, global hotkeys and the Settings window.
+    Publish as one self-contained executable with:
+      dotnet publish src/AmbientLight.App -p:PublishProfile=win-x64
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>AmbientLight.App</RootNamespace>
+    <AssemblyName>AmbientLight</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\AmbientLight.ico</ApplicationIcon>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- The app has no public API; XAML-generated members carry no documentation. -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- Do not copy the libraries' XML documentation next to the exe; symbols are embedded (Directory.Build.props). -->
+    <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
+    <!--
+      WPF needs real cultures: its text stack resolves xml:lang "en-US" to a specific CultureInfo and throws
+      "Cannot find non-neutral culture related to 'en-us'" in globalization-invariant mode, so the process that
+      hosts the UI opts out of the repository-wide InvariantGlobalization. The libraries stay culture-neutral.
+    -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Footprint of an always-on tray app">
+    <!--
+      The pipeline allocates nothing per frame, so the GC hardly ever runs: a background GC thread would only
+      cost memory. Workstation non-concurrent GC is the smallest configuration.
+    -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <!-- English UI only: do not ship the WPF and runtime resource satellites for other languages. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="H.NotifyIcon.Wpf" />
+    <PackageReference Include="Serilog" />
+    <PackageReference Include="Serilog.Extensions.Logging" />
+    <PackageReference Include="Serilog.Sinks.File" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AmbientLight.Host\AmbientLight.Host.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\AmbientLight.ico" />
+    <Resource Include="Assets\AmbientLight-paused.ico" />
+  </ItemGroup>
+</Project>

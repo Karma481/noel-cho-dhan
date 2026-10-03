@@ -160,4 +160,28 @@ public sealed class TripleBufferTests
 
         Assert.NotSame(broadcaster.GetSubscriber(0).ReadSlot, broadcaster.GetSubscriber(1).ReadSlot);
     }
+
+    [Fact]
+    public void Broadcaster_SkipsDisabledSubscribers()
+    {
+        using var broadcaster = new LatestValueBroadcaster<FrameData>(2, () => new FrameData(8));
+        var source = new FrameData(8) { Sequence = 1 };
+
+        broadcaster.SetSubscriberEnabled(1, false);
+        broadcaster.Publish(source);
+
+        Assert.True(broadcaster.IsSubscriberEnabled(0));
+        Assert.False(broadcaster.IsSubscriberEnabled(1));
+        Assert.True(broadcaster.GetSubscriber(0).TryAcquireLatest());
+        Assert.False(broadcaster.GetSubscriber(1).TryAcquireLatest());
+        Assert.Equal(0, broadcaster.GetSubscriber(1).PublishedCount);
+
+        // Re-enabled, the subscriber receives the next publish.
+        broadcaster.SetSubscriberEnabled(1, true);
+        source.Sequence = 2;
+        broadcaster.Publish(source);
+
+        Assert.True(broadcaster.GetSubscriber(1).TryAcquireLatest());
+        Assert.Equal(2, broadcaster.GetSubscriber(1).ReadSlot.Sequence);
+    }
 }

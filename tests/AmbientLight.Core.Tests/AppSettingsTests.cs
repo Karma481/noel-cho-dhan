@@ -169,6 +169,32 @@ public sealed class AppSettingsTests
     }
 
     [Fact]
+    public void SettingsHolder_RaisesPublished_OnlyForAcceptedSettings()
+    {
+        var holder = new SettingsHolder(new AppSettings());
+        var published = new List<SettingsSnapshot>();
+        holder.Published += (_, snapshot) => published.Add(snapshot);
+
+        holder.TryPublish(new AppSettings { Capture = new CaptureSettings { MaxFps = 0 } }, out _);
+        holder.TryPublish(new AppSettings { Capture = new CaptureSettings { MaxFps = 30 } }, out _);
+
+        var snapshot = Assert.Single(published);
+        Assert.Same(holder.Current, snapshot);
+        Assert.Equal(30, snapshot.Settings.Capture.MaxFps);
+    }
+
+    [Fact]
+    public void PerformanceDefaults_FavorLaptops()
+    {
+        var settings = new AppSettings();
+
+        Assert.False(settings.Serial.Enabled);
+        Assert.True(settings.Performance.PauseOverlayInExclusiveFullscreen);
+        Assert.True(settings.Performance.PreferPowerSavingGpu);
+        Assert.Contains("\"performance\"", AppSettingsStore.Serialize(settings), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FrameData_CopyFrom_CopiesColorsAndMetadata()
     {
         var source = new FrameData(4) { Sequence = 3, LayoutVersion = 2, SourceWidth = 3840, SourceHeight = 2160, IsTransitioning = true };

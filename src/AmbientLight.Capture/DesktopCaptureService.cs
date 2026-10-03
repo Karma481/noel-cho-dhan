@@ -56,6 +56,9 @@ public sealed class DesktopCaptureService : IDisposable
     private readonly Lock _lifecycleLock = new();
     private readonly ZoneConfig[] _textureZones = new ZoneConfig[LedLayoutSettings.MaxLedCount];
 
+    // Adapters on which Desktop Duplication failed with DXGI_ERROR_UNSUPPORTED (hybrid laptops). Capture thread only.
+    private readonly HashSet<long> _excludedAdapters = [];
+
     private Thread? _thread;
     private volatile bool _stopRequested;
     private int _status;
@@ -310,7 +313,7 @@ public sealed class DesktopCaptureService : IDisposable
 
         // Build all three or none, so a failure (shader compile, out of video memory) never leaves a
         // half-initialized set behind.
-        var device = CaptureDevice.Create(capture.OutputDeviceName);
+        var device = CaptureDevice.Create(capture.OutputDeviceName, _excludedAdapters);
         GpuZoneReducer? reducer = null;
         try
         {
@@ -504,8 +507,21 @@ public sealed class DesktopCaptureService : IDisposable
                 SetStatus(CaptureStatus.Recovering);
                 break;
 
+            case CaptureRecovery.SwitchAdapter:
+                if (_device is not null)
+                {
+                    _excludedAdapters.Add(_device.AdapterLuid);
+                }
+
+                ReleaseGpuResources();
+                Interlocked.Increment(ref _deviceRecreations);
+                SetStatus(CaptureStatus.Recovering);
+                break;
+
             case CaptureRecovery.Fatal:
             default:
+                // Start over on every adapter next time: the user may have changed the GPU preference or drivers.
+                _excludedAdapters.Clear();
                 ReleaseGpuResources();
                 SetStatus(CaptureStatus.Faulted);
                 break;
