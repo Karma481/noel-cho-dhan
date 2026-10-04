@@ -11,7 +11,10 @@ namespace AmbientLight.Processing.Pipeline;
 /// hot loop does no lookups, no conversions and no allocations.
 /// </summary>
 /// <param name="TemperatureGains">Color temperature as linear RGB gains (applies to LEDs and overlay).</param>
-/// <param name="Saturation">Saturation multiplier.</param>
+/// <param name="Saturation">Saturation multiplier of the LED colors.</param>
+/// <param name="DisplaySaturation">Saturation multiplier of the overlay colors.</param>
+/// <param name="DisplayContrast">Contrast of the overlay tone curve (1 = linear).</param>
+/// <param name="DisplayGain">Luminance gain of the overlay tone curve (1 = unchanged).</param>
 /// <param name="LedGains">Strip white balance times brightness (LEDs only).</param>
 /// <param name="LedGamma">Exponent applied to sRGB-encoded values for LED PWM.</param>
 /// <param name="BlackThresholdLinear">Linear luma below which a zone is forced to black.</param>
@@ -22,6 +25,9 @@ namespace AmbientLight.Processing.Pipeline;
 public readonly record struct ColorPipelineParameters(
     Vector3 TemperatureGains,
     float Saturation,
+    float DisplaySaturation,
+    float DisplayContrast,
+    float DisplayGain,
     Vector3 LedGains,
     float LedGamma,
     float BlackThresholdLinear,
@@ -36,11 +42,15 @@ public readonly record struct ColorPipelineParameters(
         ArgumentNullException.ThrowIfNull(settings);
         var processing = settings.Processing;
         var serial = settings.Serial;
+        var overlay = settings.Overlay;
         var whiteBalance = processing.WhiteBalance;
 
         return new ColorPipelineParameters(
             ColorTemperature.GainsFor(processing.ColorTemperatureK),
             processing.Saturation,
+            overlay.Saturation,
+            overlay.Contrast,
+            overlay.LuminanceGain,
             new Vector3(whiteBalance.R, whiteBalance.G, whiteBalance.B) * processing.Brightness,
             processing.LedGamma,
             ColorMath.SrgbToLinear(processing.BlackThreshold / 255f),

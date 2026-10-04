@@ -48,10 +48,19 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
 
     // Form fields (see SettingsFormValues).
     private bool _overlayEnabled;
-    private double _overlayBrightness;
-    private double _blurRadius;
+    private double _innerIntensity;
+    private double _innerGlow;
+    private double _washIntensity;
     private double _spreadWidth;
+    private double _blurRadius;
+    private OverlayBlendMode _blendMode;
+    private double _overlayBrightness;
     private double _opacity;
+    private double _saturation;
+    private double _contrast;
+    private double _luminanceGain;
+    private bool _keepPictureClear;
+    private OverlayPreset _activePreset;
     private int _targetFps;
     private bool _pauseOverlayInExclusiveFullscreen;
     private bool _preferPowerSavingGpu;
@@ -124,6 +133,96 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
         set => SetAndPublish(ref _overlayEnabled, value);
     }
 
+    public bool IsSubtlePreset
+    {
+        get => _activePreset == OverlayPreset.Subtle;
+        set => SelectPreset(value, OverlayPreset.Subtle);
+    }
+
+    public bool IsBalancedPreset
+    {
+        get => _activePreset == OverlayPreset.Balanced;
+        set => SelectPreset(value, OverlayPreset.Balanced);
+    }
+
+    public bool IsCinematicPreset
+    {
+        get => _activePreset == OverlayPreset.Cinematic;
+        set => SelectPreset(value, OverlayPreset.Cinematic);
+    }
+
+    /// <summary>What the active preset does, or that the look has been customized.</summary>
+    public string PresetHint => _activePreset switch
+    {
+        OverlayPreset.Subtle => "A calm halo close to the bezel, gentle colors.",
+        OverlayPreset.Balanced => "A bright edge glow with a soft ambient wash. The default.",
+        OverlayPreset.Cinematic => "Additive light washing deep into the screen with boosted color, like a video player's ambient mode.",
+        _ => "Custom look. Pick a preset to start over from it.",
+    };
+
+    /// <summary>Inner glow strength, 0..100 %.</summary>
+    public double InnerIntensity
+    {
+        get => _innerIntensity;
+        set => SetAndPublish(ref _innerIntensity, value);
+    }
+
+    /// <summary>Inner glow width, 0.2..10 % of the shorter screen side.</summary>
+    public double InnerGlow
+    {
+        get => _innerGlow;
+        set => SetAndPublish(ref _innerGlow, value);
+    }
+
+    /// <summary>Ambient wash strength, 0..100 %.</summary>
+    public double WashIntensity
+    {
+        get => _washIntensity;
+        set => SetAndPublish(ref _washIntensity, value);
+    }
+
+    /// <summary>Ambient wash spread, 0.5..50 % of the shorter screen side.</summary>
+    public double SpreadWidth
+    {
+        get => _spreadWidth;
+        set => SetAndPublish(ref _spreadWidth, value);
+    }
+
+    /// <summary>Ambient wash blur radius, 0..50 % of the shorter screen side.</summary>
+    public double BlurRadius
+    {
+        get => _blurRadius;
+        set => SetAndPublish(ref _blurRadius, value);
+    }
+
+    // ── Color & Blend ──────────────────────────────────────────────────────────────────────────────
+
+    public bool IsNormalBlend
+    {
+        get => _blendMode == OverlayBlendMode.Normal;
+        set => SelectBlendMode(value, OverlayBlendMode.Normal);
+    }
+
+    public bool IsScreenBlend
+    {
+        get => _blendMode == OverlayBlendMode.Screen;
+        set => SelectBlendMode(value, OverlayBlendMode.Screen);
+    }
+
+    public bool IsAdditiveBlend
+    {
+        get => _blendMode == OverlayBlendMode.Additive;
+        set => SelectBlendMode(value, OverlayBlendMode.Additive);
+    }
+
+    /// <summary>What the selected blend mode looks like.</summary>
+    public string BlendHint => _blendMode switch
+    {
+        OverlayBlendMode.Normal => "Paints the glow over the picture with the set opacity; dark scenes darken the edges.",
+        OverlayBlendMode.Screen => "Adds light like a projector: dark colors stay transparent and bright content stays bright.",
+        _ => "Adds the full glow to the picture: the most intense look, may wash out bright content at the edges.",
+    };
+
     /// <summary>0..100 %.</summary>
     public double OverlayBrightness
     {
@@ -131,25 +230,39 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
         set => SetAndPublish(ref _overlayBrightness, value);
     }
 
-    /// <summary>0..25 % of the shorter screen side.</summary>
-    public double BlurRadius
-    {
-        get => _blurRadius;
-        set => SetAndPublish(ref _blurRadius, value);
-    }
-
-    /// <summary>0.5..25 % of the shorter screen side.</summary>
-    public double SpreadWidth
-    {
-        get => _spreadWidth;
-        set => SetAndPublish(ref _spreadWidth, value);
-    }
-
     /// <summary>0..100 %.</summary>
     public double Opacity
     {
         get => _opacity;
         set => SetAndPublish(ref _opacity, value);
+    }
+
+    /// <summary>0..2×.</summary>
+    public double Saturation
+    {
+        get => _saturation;
+        set => SetAndPublish(ref _saturation, value);
+    }
+
+    /// <summary>0.5..2×.</summary>
+    public double Contrast
+    {
+        get => _contrast;
+        set => SetAndPublish(ref _contrast, value);
+    }
+
+    /// <summary>0.5..2×.</summary>
+    public double LuminanceGain
+    {
+        get => _luminanceGain;
+        set => SetAndPublish(ref _luminanceGain, value);
+    }
+
+    /// <summary>In letterboxed video, light only the black bars.</summary>
+    public bool KeepPictureClear
+    {
+        get => _keepPictureClear;
+        set => SetAndPublish(ref _keepPictureClear, value);
     }
 
     // ── Performance & Mode ─────────────────────────────────────────────────────────────────────────
@@ -360,18 +473,73 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
         }
     }
 
-    private SettingsFormValues CurrentValues() => new(
-        _overlayEnabled,
-        _overlayBrightness,
-        _blurRadius,
-        _spreadWidth,
-        _opacity,
-        _targetFps,
-        _pauseOverlayInExclusiveFullscreen,
-        _preferPowerSavingGpu,
-        _serialEnabled,
-        _portName,
-        _baudRate);
+    private SettingsFormValues CurrentValues() => new()
+    {
+        OverlayEnabled = _overlayEnabled,
+        InnerIntensityPercent = _innerIntensity,
+        InnerGlowPercent = _innerGlow,
+        WashIntensityPercent = _washIntensity,
+        SpreadWidthPercent = _spreadWidth,
+        BlurRadiusPercent = _blurRadius,
+        BlendMode = _blendMode,
+        OverlayBrightnessPercent = _overlayBrightness,
+        OpacityPercent = _opacity,
+        Saturation = _saturation,
+        Contrast = _contrast,
+        LuminanceGain = _luminanceGain,
+        KeepPictureClear = _keepPictureClear,
+        TargetFps = _targetFps,
+        PauseOverlayInExclusiveFullscreen = _pauseOverlayInExclusiveFullscreen,
+        PreferPowerSavingGpu = _preferPowerSavingGpu,
+        SerialEnabled = _serialEnabled,
+        PortName = _portName,
+        BaudRate = _baudRate,
+    };
+
+    private void SelectPreset(bool selected, OverlayPreset preset)
+    {
+        if (!selected || _loading || _disposed)
+        {
+            return;
+        }
+
+        // The form, not the published settings, is the basis: an edit that is still invalid (LED output without
+        // a port) is kept while the look changes.
+        var basis = CurrentValues().ApplyTo(_settings.Current.Settings);
+        var next = basis with { Overlay = OverlayPresets.Apply(basis.Overlay, preset) };
+        LoadFrom(next);
+        Publish();
+    }
+
+    private void SelectBlendMode(bool selected, OverlayBlendMode mode)
+    {
+        if (!selected || _blendMode == mode)
+        {
+            return;
+        }
+
+        _blendMode = mode;
+        OnPropertyChanged(nameof(IsNormalBlend));
+        OnPropertyChanged(nameof(IsScreenBlend));
+        OnPropertyChanged(nameof(IsAdditiveBlend));
+        OnPropertyChanged(nameof(BlendHint));
+        Publish();
+    }
+
+    private void UpdateActivePreset()
+    {
+        var preset = OverlayPresets.Detect(CurrentValues().ApplyTo(_settings.Current.Settings).Overlay);
+        if (preset == _activePreset)
+        {
+            return;
+        }
+
+        _activePreset = preset;
+        OnPropertyChanged(nameof(IsSubtlePreset));
+        OnPropertyChanged(nameof(IsBalancedPreset));
+        OnPropertyChanged(nameof(IsCinematicPreset));
+        OnPropertyChanged(nameof(PresetHint));
+    }
 
     private void Publish()
     {
@@ -381,6 +549,7 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
         }
 
         var next = CurrentValues().ApplyTo(_settings.Current.Settings);
+        UpdateActivePreset();
         _publishing = true;
         try
         {
@@ -407,10 +576,18 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
         try
         {
             OverlayEnabled = values.OverlayEnabled;
-            OverlayBrightness = values.OverlayBrightnessPercent;
-            BlurRadius = values.BlurRadiusPercent;
+            InnerIntensity = values.InnerIntensityPercent;
+            InnerGlow = values.InnerGlowPercent;
+            WashIntensity = values.WashIntensityPercent;
             SpreadWidth = values.SpreadWidthPercent;
+            BlurRadius = values.BlurRadiusPercent;
+            SelectBlendMode(true, values.BlendMode);
+            OverlayBrightness = values.OverlayBrightnessPercent;
             Opacity = values.OpacityPercent;
+            Saturation = values.Saturation;
+            Contrast = values.Contrast;
+            LuminanceGain = values.LuminanceGain;
+            KeepPictureClear = values.KeepPictureClear;
             SetTargetFps(values.TargetFps);
             PauseOverlayInExclusiveFullscreen = values.PauseOverlayInExclusiveFullscreen;
             PreferPowerSavingGpu = values.PreferPowerSavingGpu;
@@ -428,6 +605,8 @@ internal sealed class SettingsViewModel : ObservableObject, IDisposable
         {
             _loading = false;
         }
+
+        UpdateActivePreset();
     }
 
     private void RefreshPorts()

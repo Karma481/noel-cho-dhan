@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Numerics;
+using AmbientLight.Core.Settings;
 using SharpGen.Runtime;
 using Vortice.Direct2D1;
 using Vortice.Direct2D1.Effects;
@@ -44,32 +45,51 @@ public sealed class OverlayDeviceLostException : Exception
 }
 
 /// <summary>
-/// Draws the glow into a DirectComposition swapchain attached to the overlay window.
+/// Draws the two-layer glow into a DirectComposition swapchain attached to the overlay window.
 /// </summary>
 /// <remarks>
 /// <para>Per redraw, all on this renderer's own D3D11 device (never shared with the capture thread):</para>
 /// <code>
-/// canvas (render size + margin)  ◄─ FillRectangle per zone band (aliased, so adjacent bands have no seams)
-///     │
-///     ▼ Direct2D Gaussian blur effect (border mode hard)
-/// swapchain back buffer (render size = screen / divisor)  ◄─ DrawImage at -margin
-///     │ Present(1)
-///     ▼
-/// DirectComposition visual: scale × divisor, bilinear ──► DWM composes it over the monitor
+/// inner canvas ◄─ FillRectangle per zone (thin bands) ─► Gaussian blur (narrow) ──┐
+///                                                                                ├─► arithmetic composite: screen
+/// wash canvas  ◄─ FillRectangle per zone (wide bands) ─► Gaussian blur (wide)  ──┘   a + b − a·b
+///                                                                                       │
+///                                     color matrix: output alpha for the blend mode ◄───┘
+///                                                       │ DrawImage (source copy) at −margin,
+///                                                       │ then clear the picture of a letterboxed video
+///                                                       ▼
+/// swapchain back buffer (screen / divisor) ─ Present(1) ─► DirectComposition visual (scale × divisor, bilinear)
+///                                                             └─► DWM: result = glow + screen × (1 − alpha)
 /// </code>
 /// <para>
-/// Rendering at 1/8 of the screen resolution makes the blur 64 times cheaper; the glow is a
-/// low-frequency signal, so the bilinear upscale done by DWM is visually indistinguishable from a
-/// full-resolution render. No GPU object is created per frame: the canvas, brush, blur effect and its
-/// output are created when the layout changes and reused.
+/// <b>Layers.</b> The inner glow is a thin band with a small blur, so it is intense right at the bezel; the
+/// ambient wash is a wide band with a very large blur that tints the screen far inwards. They are combined with
+/// a screen blend on premultiplied values, which, unlike a sum, can never exceed full intensity, so the colors
+/// saturate smoothly instead of being clipped channel by channel.
+/// </para>
+/// <para>
+/// <b>Blend modes.</b> DWM composes the premultiplied swapchain as <c>glow + screen × (1 − alpha)</c>. The
+/// color matrix (in straight mode, so it works on the premultiplied values as they are) only rewrites alpha:
+/// </para>
+/// <list type="bullet">
+/// <item><see cref="OverlayBlendMode.Normal"/>: alpha unchanged, ordinary "over" painting.</item>
+/// <item><see cref="OverlayBlendMode.Screen"/>: alpha = luminance of the glow. Dark glow is transparent, and
+/// bright content under a colored glow is barely dimmed, which approximates a per-channel screen blend
+/// (<c>glow + screen × (1 − glow)</c>) with the single alpha channel DWM supports.</item>
+/// <item><see cref="OverlayBlendMode.Additive"/>: alpha = 0, so DWM adds the glow to the screen.</item>
+/// </list>
+/// <para>
+/// Rendering at 1/8 of the screen resolution makes both blurs 64 times cheaper; the glow is a low-frequency
+/// signal, so the bilinear upscale done by DWM is visually indistinguishable from a full-resolution render. No
+/// GPU object is created per frame: canvases, brush and effects are created when the layout changes and reused.
 /// </para>
 /// </remarks>
 internal sealed class GlowRenderer : IDisposable
 {
     private const int D2DErrorRecreateTarget = unchecked((int)0x8899000C);
 
-    /// <summary>Upper bound of the D2D Gaussian blur standard deviation (D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION).</summary>
-    private const float MaxBlurSigma = 250f;
+    /// <summary>Screen blend of the two layers on premultiplied values: C1·a·b + C2·a + C3·b + C4 = a + b − a·b.</summary>
+    private static readonly Vector4 ScreenCoefficients = new(-1f, 1f, 1f, 0f);
 
     private static readonly FeatureLevel[] FeatureLevels =
         [FeatureLevel.Level_11_1, FeatureLevel.Level_11_0, FeatureLevel.Level_10_1, FeatureLevel.Level_10_0];
@@ -84,16 +104,21 @@ internal sealed class GlowRenderer : IDisposable
     private readonly ID2D1Device _d2dDevice;
     private readonly ID2D1DeviceContext _context;
     private readonly ID2D1SolidColorBrush _brush;
-    private readonly GaussianBlur _blur;
+    private readonly GaussianBlur _innerBlur;
+    private readonly GaussianBlur _washBlur;
+    private readonly ArithmeticComposite _combine;
+    private readonly ColorMatrix _blend;
+    private readonly ID2D1Image _output;
     private readonly IDCompositionDevice _compositionDevice;
     private readonly IDCompositionTarget _compositionTarget;
     private readonly IDCompositionVisual _visual;
 
     private IDXGISwapChain1? _swapChain;
     private ID2D1Bitmap1? _backBuffer;
-    private ID2D1Bitmap1? _canvas;
-    private ID2D1Image? _blurOutput;
+    private ID2D1Bitmap1? _innerCanvas;
+    private ID2D1Bitmap1? _washCanvas;
     private GlowLayout _layout;
+    private OverlayBlendMode? _blendMode;
     private bool _commitPending;
 
     private GlowRenderer(IntPtr hwnd, ID3D11Device device)
@@ -117,11 +142,16 @@ internal sealed class GlowRenderer : IDisposable
             _context.UnitMode = UnitMode.Pixels;
             _context.AntialiasMode = AntialiasMode.Aliased;
             _brush = _context.CreateSolidColorBrush(Transparent);
-            _blur = new GaussianBlur(_context)
-            {
-                BorderMode = D2DBorderMode.Hard,
-                Optimization = GaussianBlurOptimization.Balanced,
-            };
+            _innerBlur = CreateBlur(_context);
+            _washBlur = CreateBlur(_context);
+
+            _combine = new ArithmeticComposite(_context) { Coefficients = ScreenCoefficients, ClampOutput = true };
+            _combine.SetInputEffect(0, _innerBlur, true);
+            _combine.SetInputEffect(1, _washBlur, true);
+
+            _blend = new ColorMatrix(_context) { AlphaMode = ColorMatrixAlphaMode.Straight };
+            _blend.SetInputEffect(0, _combine, true);
+            _output = _blend.Output;
 
             _compositionDevice = DComp.DCompositionCreateDevice<IDCompositionDevice>(_dxgiDevice);
             _compositionDevice.CreateTargetForHwnd(hwnd, true, out var target).CheckError();
@@ -179,10 +209,11 @@ internal sealed class GlowRenderer : IDisposable
     }
 
     /// <summary>
-    /// Applies a layout: (re)creates the swapchain when the render size changes, the canvas when the margin
-    /// changes, updates the blur strength and the composition scale, and commits the visual tree.
+    /// Applies a layout and blend mode: (re)creates the swapchain when the render size changes, the canvases when
+    /// the margin changes, updates both blur strengths, the blend matrix and the composition scale, and commits
+    /// the visual tree.
     /// </summary>
-    public void Configure(in GlowLayout layout)
+    public void Configure(in GlowLayout layout, OverlayBlendMode blendMode)
     {
         try
         {
@@ -191,12 +222,19 @@ internal sealed class GlowRenderer : IDisposable
                 CreateSwapChain(layout.RenderWidth, layout.RenderHeight);
             }
 
-            if (_canvas is null || layout.CanvasWidth != _layout.CanvasWidth || layout.CanvasHeight != _layout.CanvasHeight)
+            if (_innerCanvas is null || layout.CanvasWidth != _layout.CanvasWidth || layout.CanvasHeight != _layout.CanvasHeight)
             {
-                CreateCanvas(layout.CanvasWidth, layout.CanvasHeight);
+                CreateCanvases(layout.CanvasWidth, layout.CanvasHeight);
             }
 
-            _blur.StandardDeviation = Math.Clamp(layout.BlurSigma, 0f, MaxBlurSigma);
+            _innerBlur.StandardDeviation = Math.Clamp(layout.InnerSigma, 0f, GlowGeometry.MaxBlurSigma);
+            _washBlur.StandardDeviation = Math.Clamp(layout.WashSigma, 0f, GlowGeometry.MaxBlurSigma);
+            if (_blendMode != blendMode)
+            {
+                _blend.Matrix = BlendMatrix(blendMode);
+                _blendMode = blendMode;
+            }
+
             _visual.SetTransform(Matrix3x2.CreateScale(layout.ScaleX, layout.ScaleY)).CheckError();
 
             // Committed after the next Present, so DWM never composes a new swapchain before it has content.
@@ -209,32 +247,60 @@ internal sealed class GlowRenderer : IDisposable
         }
     }
 
-    /// <summary>Draws <paramref name="segments"/> (canvas coordinates), blurs them and presents. Returns the CPU time spent.</summary>
-    public TimeSpan Render(ReadOnlySpan<GlowSegment> segments)
+    /// <summary>
+    /// The color matrix that turns the combined (premultiplied) glow into what DWM should compose. Rows are the
+    /// input R, G, B, A and a constant; columns the output R, G, B, A. Color passes through unchanged.
+    /// </summary>
+    internal static Matrix5x4 BlendMatrix(OverlayBlendMode blendMode)
     {
-        if (_canvas is null || _backBuffer is null || _blurOutput is null || _swapChain is null)
+        var (fromRed, fromGreen, fromBlue, fromAlpha) = blendMode switch
+        {
+            OverlayBlendMode.Normal => (0f, 0f, 0f, 1f),
+            OverlayBlendMode.Screen => (0.2126f, 0.7152f, 0.0722f, 0f),
+            OverlayBlendMode.Additive => (0f, 0f, 0f, 0f),
+            _ => throw new ArgumentOutOfRangeException(nameof(blendMode), blendMode, "Unknown blend mode."),
+        };
+
+        return new Matrix5x4(
+            1f, 0f, 0f, fromRed,
+            0f, 1f, 0f, fromGreen,
+            0f, 0f, 1f, fromBlue,
+            0f, 0f, 0f, fromAlpha,
+            0f, 0f, 0f, 0f);
+    }
+
+    /// <summary>
+    /// Draws both layers' bands (canvas coordinates), runs the blur/blend graph, clears <paramref name="mask"/>
+    /// (the picture of a letterboxed video) and presents. Returns the CPU time spent.
+    /// </summary>
+    public TimeSpan Render(ReadOnlySpan<GlowSegment> innerSegments, ReadOnlySpan<GlowSegment> washSegments, PictureMask? mask)
+    {
+        if (_innerCanvas is null || _washCanvas is null || _backBuffer is null || _swapChain is null)
         {
             throw new InvalidOperationException("Configure the renderer before rendering.");
         }
 
         var started = Stopwatch.GetTimestamp();
 
-        _context.Target = _canvas;
-        _context.BeginDraw();
-        _context.Clear(Transparent);
-        foreach (var segment in segments)
-        {
-            _brush.Color = new Color4(segment.Red, segment.Green, segment.Blue, segment.Alpha);
-            _context.FillRectangle(new Vortice.RawRectF(segment.Left, segment.Top, segment.Right, segment.Bottom), _brush);
-        }
-
-        CheckEndDraw(_context.EndDraw());
+        DrawBands(_innerCanvas, innerSegments);
+        DrawBands(_washCanvas, washSegments);
 
         _context.Target = _backBuffer;
         _context.BeginDraw();
         _context.Clear(Transparent);
         var offset = new Vector2(-_layout.Margin, -_layout.Margin);
-        _context.DrawImage(_blurOutput, in offset, D2DInterpolationMode.Linear, D2DCompositeMode.SourceOver);
+
+        // Source copy: the blend matrix may produce color without alpha (additive), which must reach the
+        // swapchain exactly as computed rather than be composited again.
+        _context.DrawImage(_output, in offset, D2DInterpolationMode.Linear, D2DCompositeMode.SourceCopy);
+        if (mask is { } picture)
+        {
+            // Clear honours the axis-aligned clip, so this empties exactly the picture area.
+            _context.PushAxisAlignedClip(new Vortice.RawRectF(picture.Left, picture.Top, picture.Right, picture.Bottom), AntialiasMode.Aliased);
+            _context.Clear(Transparent);
+            _context.PopAxisAlignedClip();
+        }
+
         CheckEndDraw(_context.EndDraw());
 
         var present = _swapChain.Present(1, PresentFlags.None);
@@ -264,6 +330,12 @@ internal sealed class GlowRenderer : IDisposable
     }
 
     public void Dispose() => ReleaseInterfaces(disposeDevice: true);
+
+    private static GaussianBlur CreateBlur(ID2D1DeviceContext context) => new(context)
+    {
+        BorderMode = D2DBorderMode.Hard,
+        Optimization = GaussianBlurOptimization.Balanced,
+    };
 
     private static bool IsDeviceLoss(int code) =>
         code == DxgiResult.DeviceRemoved.Code ||
@@ -344,16 +416,32 @@ internal sealed class GlowRenderer : IDisposable
         _visual.SetContent(_swapChain).CheckError();
     }
 
-    private void CreateCanvas(int width, int height)
+    private void DrawBands(ID2D1Bitmap1 canvas, ReadOnlySpan<GlowSegment> segments)
     {
-        _blurOutput?.Dispose();
-        _blurOutput = null;
-        _canvas?.Dispose();
+        _context.Target = canvas;
+        _context.BeginDraw();
+        _context.Clear(Transparent);
+        foreach (var segment in segments)
+        {
+            _brush.Color = new Color4(segment.Red, segment.Green, segment.Blue, segment.Alpha);
+            _context.FillRectangle(new Vortice.RawRectF(segment.Left, segment.Top, segment.Right, segment.Bottom), _brush);
+        }
+
+        CheckEndDraw(_context.EndDraw());
+    }
+
+    private void CreateCanvases(int width, int height)
+    {
+        _context.Target = null;
+        _innerCanvas?.Dispose();
+        _washCanvas?.Dispose();
 
         var size = new SizeI(width, height);
-        _canvas = _context.CreateBitmap(size, new BitmapProperties1(PremultipliedBgra, 96f, 96f, BitmapOptions.Target));
-        _blur.SetInput(0, _canvas, true);
-        _blurOutput = _blur.Output;
+        var properties = new BitmapProperties1(PremultipliedBgra, 96f, 96f, BitmapOptions.Target);
+        _innerCanvas = _context.CreateBitmap(size, properties);
+        _washCanvas = _context.CreateBitmap(size, properties);
+        _innerBlur.SetInput(0, _innerCanvas, true);
+        _washBlur.SetInput(0, _washCanvas, true);
     }
 
     // Null-tolerant so it also cleans up after a constructor that failed part-way.
@@ -368,7 +456,11 @@ internal sealed class GlowRenderer : IDisposable
         _visual?.Dispose();
         _compositionTarget?.Dispose();
         _compositionDevice?.Dispose();
-        _blur?.Dispose();
+        _output?.Dispose();
+        _blend?.Dispose();
+        _combine?.Dispose();
+        _washBlur?.Dispose();
+        _innerBlur?.Dispose();
         _brush?.Dispose();
         _context?.Dispose();
         _d2dDevice?.Dispose();
@@ -383,10 +475,10 @@ internal sealed class GlowRenderer : IDisposable
 
     private void ReleaseSizedResources()
     {
-        _blurOutput?.Dispose();
-        _blurOutput = null;
-        _canvas?.Dispose();
-        _canvas = null;
+        _innerCanvas?.Dispose();
+        _innerCanvas = null;
+        _washCanvas?.Dispose();
+        _washCanvas = null;
         _backBuffer?.Dispose();
         _backBuffer = null;
         _swapChain?.Dispose();

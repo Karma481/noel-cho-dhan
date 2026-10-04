@@ -113,7 +113,7 @@ public sealed class Phase3ContractTests
 
         var invalid = new AppSettings
         {
-            Overlay = new OverlaySettings { SpreadFraction = 0f, BlurRadiusFraction = 0.5f, Brightness = 2f, Opacity = -0.1f },
+            Overlay = new OverlaySettings { SpreadFraction = 0f, BlurRadiusFraction = 0.6f, Brightness = 2f, Opacity = -0.1f },
         };
         var paths = invalid.Validate().Select(issue => issue.Path).ToHashSet();
 

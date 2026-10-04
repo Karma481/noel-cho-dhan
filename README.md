@@ -1,8 +1,8 @@
 # System-wide Ambient Light
 
-Windows desktop app that samples the screen in real time (video, browsers, games), draws a soft
-glow around the screen edges as a click-through overlay, and drives a physical RGB LED strip
-(ESP32, Adalight protocol).
+Windows desktop app that samples the screen in real time (video, browsers, games), draws a
+two-layer cinematic glow around the screen edges as a click-through overlay, and drives a physical
+RGB LED strip (ESP32, Adalight protocol).
 
 - **Stack:** C# / .NET 10 LTS, Vortice.Windows (DXGI Desktop Duplication, D3D11 compute, Direct2D,
   DirectComposition), Win32 comm API, WPF tray app; ESP32 firmware in C++ (PlatformIO, NeoPixelBus over RMT)
@@ -25,7 +25,7 @@ notification area:
 |---|---|
 | Tray menu | Settings…, Pause/Resume effect, Exit (double-click opens Settings) |
 | Hotkeys | **Ctrl+Alt+L** pause/resume, **Ctrl+Alt+O** overlay on/off |
-| Settings | *Virtual Overlay* (brightness, opacity, spread width, blur radius), *Performance & Mode* (30/60 FPS, hide in exclusive fullscreen, power-saving GPU, start with Windows), *Hardware LED* (on/off, COM port, baud rate) |
+| Settings | *Virtual Overlay* (Subtle / Balanced / Cinematic presets, inner glow, ambient wash spreading up to half the screen), *Color & Blend* (Normal / Screen / Additive blend, keep letterboxed pictures clear, brightness, opacity, saturation up to 2×, contrast, luminance gain), *Performance & Mode* (30/60 FPS, hide in exclusive fullscreen, power-saving GPU, start with Windows), *Hardware LED* (on/off, COM port, baud rate) |
 | Files | `%LOCALAPPDATA%\AmbientLight\config.json` (saved automatically), `logs\` |
 | Command line | `--autostart` (start silently), `--exit` (close the running instance), `--verbose` (debug log) |
 

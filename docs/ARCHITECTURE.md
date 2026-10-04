@@ -105,7 +105,7 @@ Bằng chứng: test `ConcurrentProducerAndConsumer_NeverObserveTornOrStaleFrame
 ### 2.6 Ngân sách GPU (< 2%)
 
 - **Reduce:** 100 zone × 16×16 mẫu = 25.600 texel/frame — không đáng kể (< 0.05 ms).
-- **Overlay:** render glow ở **1/8 độ phân giải**, để DirectComposition upscale bilinear. Glow là tần số thấp nên blur "miễn phí", chi phí fill giảm 64×. Chỉ `Present` khi màu thay đổi → màn hình tĩnh = 0 GPU.
+- **Overlay:** render glow ở **1/8 độ phân giải**, để DirectComposition upscale bilinear. Glow là tần số thấp nên blur "miễn phí", chi phí fill giảm 64×. Từ Phase 6 có hai lớp blur (inner glow + ambient wash, mục 12), vẫn ở 1/8 độ phân giải. Chỉ `Present` khi màu thay đổi → màn hình tĩnh = 0 GPU.
 - Chi phí còn lại là của DWM cho Desktop Duplication (cố định, mọi ứng dụng ambient đều chịu).
 
 ### 2.7 Rủi ro kỹ thuật đã nhận diện
@@ -155,7 +155,7 @@ noel-cho-dhan/
 │   │   ├── Color/ColorRgb.cs
 │   │   ├── Zones/ScreenEdge.cs, NormalizedRect.cs, ZoneConfig.cs, ZoneLayoutBuilder.cs
 │   │   ├── Frames/ICopyFrom.cs, FrameTiming.cs, ZoneSampleFrame.cs, FrameData.cs
-│   │   ├── Settings/AppSettings.cs, SettingsIssue.cs, AppSettingsJsonContext.cs,
+│   │   ├── Settings/AppSettings.cs, OverlayPresets.cs, SettingsIssue.cs, AppSettingsJsonContext.cs,
 │   │   │            AppSettingsStore.cs, SettingsHolder.cs
 │   │   └── Threading/TripleBuffer.cs, LatestValueMailbox.cs, LatestValueBroadcaster.cs
 │   ├── AmbientLight.Capture/             ✅ net10.0-windows — xem mục 7
@@ -173,7 +173,7 @@ noel-cho-dhan/
 │   │   ├── Pipeline/ColorPipeline.cs, ColorPipelineParameters.cs, TemporalSmoother.cs, PowerLimiter.cs
 │   │   ├── Letterbox/LetterboxDetector.cs
 │   │   └── Color/ColorMath.cs, ColorTemperature.cs
-│   ├── AmbientLight.Overlay/             ✅ net10.0-windows — xem mục 9
+│   ├── AmbientLight.Overlay/             ✅ net10.0-windows — xem mục 9 và 12
 │   │   ├── OverlayService.cs, OverlayLog.cs    thread T3 + message loop
 │   │   ├── Window/OverlayWindow.cs, OverlayWindowPolicy.cs, MonitorSelector.cs, MonitorEnumerator.cs
 │   │   ├── Rendering/GlowRenderer.cs, GlowGeometry.cs, RedrawTracker.cs
@@ -193,7 +193,7 @@ noel-cho-dhan/
 │       ├── App.xaml(.cs), AppHost.cs, AppLog.cs   composition root, vòng đời
 │       ├── Tray/TrayIconController.cs              H.NotifyIcon, menu Settings / Pause / Exit
 │       ├── Interop/HotkeyManager.cs                RegisterHotKey trên message-only window
-│       ├── Settings/SettingsWindow.xaml(.cs), SettingsViewModel.cs
+│       ├── Settings/SettingsWindow.xaml(.cs), SettingsViewModel.cs, SliderRow.cs
 │       ├── Themes/Controls.xaml                    theme sáng gọn kiểu Windows 11
 │       ├── Assets/AmbientLight.ico, AmbientLight-paused.ico
 │       ├── Properties/PublishProfiles/win-x64.pubxml
@@ -357,18 +357,22 @@ T2  LetterboxDetector → ContentBounds ──► SnapshotCell<NormalizedRect> �
 ### 8.3 Pipeline màu
 
 ```
-mẫu ─► black threshold ─► temporal smoothing ─► nhiệt độ màu ─► saturation ─► fit 0..1
-                                                                              │
-          ┌───────────────────────────────────────────────────────────────────┤
-          ▼                                                                   ▼
-  overlay: sRGB ─► DisplayColors          LED: white balance × brightness ─► sRGB ─► gamma LED ─► power limiter ─► LedColors
+mẫu ─► black threshold ─► temporal smoothing ─► nhiệt độ màu
+                                                    │
+          ┌─────────────────────────────────────────┴──────────────────────────────┐
+          ▼                                                                        ▼
+  overlay: saturation (overlay) ─► fit 0..1 ─► tone curve ─► sRGB ─► DisplayColors
+                                    LED: saturation (processing) ─► fit 0..1 ─► white balance × brightness
+                                         ─► sRGB ─► gamma LED ─► power limiter ─► LedColors
 ```
+
+Từ Phase 6, hai đầu ra có color grading riêng (mục 12.4): overlay dùng `overlay.saturation`, `overlay.contrast`, `overlay.luminanceGain`; dải LED dùng `processing.saturation`.
 
 | Bước | Chi tiết |
 |---|---|
 | **Hai đầu ra** | `FrameData` có `LedColors` (wire-ready) và `DisplayColors` (sRGB cho màn hình). Cân trắng dải LED, độ sáng, gamma LED và giới hạn dòng **chỉ** áp cho LED; nếu áp cho overlay sẽ làm sai màu trên màn hình vốn đã được hiệu chỉnh. |
 | Nhiệt độ màu | Locus Planck (spline Kim et al.) → XYZ → sRGB tuyến tính, chuẩn hoá để 6500 K = (1,1,1) và kênh lớn nhất = 1 (không bao giờ đẩy kênh nào vượt mức). 2700 K → (1, 0.44, 0.10). |
-| Saturation | `Y + s·(c − Y)` quanh độ sáng của chính màu đó. Tự giảm `s` cho từng màu sát biên gamut để không kênh nào âm, nên giữ được sắc độ. Mặc định 1.2. |
+| Saturation | `Y + s·(c − Y)` quanh độ sáng của chính màu đó. Tự giảm `s` cho từng màu sát biên gamut để không kênh nào âm, nên giữ được sắc độ. LED: `processing.saturation`, mặc định 1.2. Overlay: `overlay.saturation`, mặc định 1.35 (mục 12.4). |
 | Temporal smoothing | EMA với `α = 1 − e^(−Δt/τ)`, **không phụ thuộc frame rate** (đã test 10×10 ms = 1×100 ms). Mỗi bước bị chặn tối đa 0.1 s, nên sau một lúc màn hình tĩnh lâu thì chuyển cảnh vẫn fade thay vì nhảy cóc. Service tiếp tục tick khi chưa hội tụ, và render lại khi settings đổi trên màn hình tĩnh. |
 | Gamma LED | Mã hoá sRGB rồi `^LedGamma`, đúng như áp bảng gamma LED quen thuộc lên màu sRGB. Mặc định 2.2 gần như triệt tiêu, nên độ sáng LED tỉ lệ với ánh sáng thật của màn hình. |
 | Power limiter | `I = n·I_idle + Σ(R+G+B)/255 · mA_kênh`. Vượt ngân sách thì nhân mọi kênh với cùng hệ số (giữ sắc độ), dùng **số học nguyên chính xác** nên được *đảm bảo* không vượt (test 2000 frame ngẫu nhiên). **Bật mặc định 400 mA**, an toàn cho cổng USB 2.0. Phản ứng tức thời, không làm mượt, vì đây là cơ chế an toàn. |
@@ -417,27 +421,20 @@ còn lại ───────────────────────
 
 ### 9.3 Render glow
 
+> Phase 6 thay hình học dải và đồ thị hiệu ứng bằng glow hai lớp, khung vát góc, blend mode và preset (mục 12). Các cơ chế dưới đây vẫn giữ nguyên.
+
 ```
-OverlayWindowPolicy/GlowGeometry (CPU, 0 alloc)       GlowRenderer (D3D11 device riêng, trên adapter của màn hình đích)
+GlowGeometry (CPU, 0 alloc)                           GlowRenderer (D3D11 device riêng, trên adapter của màn hình đích)
   zone + DisplayColors ─► dải màu không chồng nhau ─► canvas D2D (kích thước render + margin, aliased)
-                                                        ─► D2D Gaussian Blur (σ = blur radius / 3, border hard)
+                                                        ─► D2D Gaussian Blur (border hard) ─► … (mục 12.1)
                                                         ─► back buffer swapchain composition (1/8 độ phân giải)
                                                         ─► Present(1) ─► Commit ─► DComp scale ×8, bilinear ─► DWM
 ```
 
-| Tham số (`overlay.*`) | Mặc định | Ý nghĩa |
-|---|---|---|
-| `spreadFraction` | 0.04 | Spread width: độ dày dải màu đặc ở mỗi mép, tính theo phần cạnh ngắn màn hình (43 px ở 1080p, 86 px ở 4K) |
-| `blurRadiusFraction` | 0.08 | Blur radius: khoảng glow mờ dần vào trong; σ = radius/3 |
-| `opacity` | 0.85 | Độ đục tối đa |
-| `brightness` | 1.0 | Cường độ màu |
-| `resolutionDivisor` | 8 | Hệ số giảm độ phân giải khi render |
+Mọi kích thước đều là tỉ lệ của cạnh ngắn màn hình thay vì pixel, nên glow trông như nhau trên màn 1080p và 4K.
 
-Dùng tỉ lệ thay vì pixel nên glow trông như nhau trên màn 1080p và 4K.
-
-- **Không chồng lấn:** dải trên/dưới sở hữu các góc, dải trái/phải được cắt ngắn lại, nên không vùng nào bị blend alpha hai lần (góc sẽ không đậm hơn cạnh). Test kiểm từng cặp dải và kiểm cả vòng quanh màn hình: mỗi điểm được phủ đúng một lần.
-- **Kéo ra margin:** dải chạm mép màn hình được kéo dài ra vùng margin ngoài màn hình, nên blur ở mép "thấy" thêm cùng màu thay vì vùng trong suốt. Mô phỏng Gaussian 1D trong test: độ sáng sát mép tăng từ ~45% lên ~92% (giới hạn lý thuyết Φ(spread/σ) với cấu hình mặc định).
-- **Chỉ vẽ khi cần:** `RedrawTracker` so sánh byte (vector hoá) màu đã vẽ, layout, settings và danh sách zone. Không đổi thì không render, không `Present`. Đo bằng test: kiểm tra này 0 byte cấp phát.
+- **Kéo ra margin:** dải chạm mép màn hình được kéo dài ra vùng margin ngoài màn hình, nên blur ở mép "thấy" thêm cùng màu thay vì vùng trong suốt. Mô phỏng Gaussian 1D trong test: độ sáng sát mép tăng từ ~45% lên ~92% (giới hạn lý thuyết Φ(spread/σ) với cấu hình mặc định của Phase 3).
+- **Chỉ vẽ khi cần:** `RedrawTracker` so sánh byte (vector hoá) màu đã vẽ, layout, settings, danh sách zone và vùng hình đang được giữ sạch. Không đổi thì không render, không `Present`. Đo bằng test: kiểm tra này 0 byte cấp phát.
 - **Không nhấp nháy khi resize:** `Commit` của DirectComposition được hoãn đến sau `Present` đầu tiên, nên DWM không bao giờ compose một swapchain chưa có nội dung. Cửa sổ chỉ hiện sau lần present thành công đầu tiên.
 - **Mất thiết bị** (`DEVICE_REMOVED/RESET/HUNG`, `D2DERR_RECREATE_TARGET`): chỉ dựng lại renderer, giữ nguyên cửa sổ.
 
@@ -451,7 +448,7 @@ Dùng tỉ lệ thay vì pixel nên glow trông như nhau trên màn 1080p và 4
 ### 9.5 Chi phí GPU và giới hạn
 
 - **Khi màu không đổi:** không render, không present. Chỉ còn chi phí cố định của DWM khi compose một texture nhỏ (480×270 ở 4K), phóng to bằng bilinear.
-- **Khi màu đổi:** một lần fill khoảng 100 hình chữ nhật và một lần blur trên canvas khoảng 526×316 px.
+- **Khi màu đổi:** hai lần fill (mỗi lớp khoảng 100 hình chữ nhật cộng bậc thang góc) và hai lần blur; kích thước canvas theo preset ở mục 12.8.
 - **Game fullscreen:** một cửa sổ topmost phủ lên game toàn màn hình có thể khiến DWM không dùng được *independent flip*, trừ khi GPU hỗ trợ multiplane overlay. Exclusive fullscreen thật thì che overlay hoàn toàn. Nếu cần, App (Phase 5) có thể thêm tuỳ chọn tự ẩn overlay khi app fullscreen đang ở foreground.
 - **Chưa kiểm chứng trên Windows thật:** sự kết hợp `WS_EX_LAYERED` + `WS_EX_NOREDIRECTIONBITMAP` + DirectComposition, việc `WDA_EXCLUDEFROMCAPTURE` loại cửa sổ khỏi Desktop Duplication, và hành vi topmost trên game borderless. Đây là các mục ưu tiên của lượt smoke test trên Windows.
 
@@ -533,7 +530,7 @@ UART RX ISR ─► ring buffer 4 KB ─► loop(): đọc khối 256 B ─► Ad
 | Host | `FullscreenMonitor`, `SingleInstance`, `StatusText` | Phát hiện exclusive fullscreen, một instance/phiên, chuỗi trạng thái cho UI |
 | App | `AppHost` | Composition root: tạo theo thứ tự, huỷ theo thứ tự ngược lại |
 | App | `TrayIconController`, `HotkeyManager` | Tray (Settings / Pause–Resume / Exit), Ctrl+Alt+L và Ctrl+Alt+O |
-| App | `SettingsWindow` + `SettingsViewModel` | 3 tab, áp dụng tức thì, footer trạng thái trực tiếp |
+| App | `SettingsWindow` + `SettingsViewModel` | 4 tab (từ Phase 6, mục 12.6), áp dụng tức thì, footer trạng thái trực tiếp |
 
 `Host` không tham chiếu WPF, nên orchestrator, config, registry và fullscreen được test trên Linux bằng stage giả, `FakeTimeProvider` và registry in-memory.
 
@@ -627,3 +624,139 @@ Kết quả trong container: `AmbientLight.exe` 157 MB, `PE32+ executable (GUI) 
   3. Không tạo được tray icon thì app từ chối khởi động.
   4. `FontWeight` của TabItem lan xuống toàn bộ nội dung tab.
 - **Chưa kiểm chứng được** (cần Windows thật có GPU): Desktop Duplication, DirectComposition, `WDA_EXCLUDEFROMCAPTURE` có hiệu lực, tray thật (tray của Wine thiếu `NIM_SETVERSION`), và laptop hybrid. Checklist ở [TESTING-WINDOWS.md](TESTING-WINDOWS.md).
+
+---
+
+## 12. Phase 6 — Overlay "cinematic": glow hai lớp, color grading, blend mode, preset
+
+Mục tiêu: glow rực và lan rộng như chế độ ambient của trình phát video, thay cho một dải mờ ở mép màn hình.
+
+### 12.1 Đồ thị hiệu ứng (`GlowRenderer`)
+
+```
+zone + DisplayColors (đã grade, mục 12.4)
+  ├─► GlowGeometry: dải inner (hẹp) ─► canvas inner ─► Gaussian Blur σ_inner ─┐
+  └─► GlowGeometry: dải wash (rộng) ─► canvas wash  ─► Gaussian Blur σ_wash  ─┤
+                                                                              ▼
+                                  ArithmeticComposite: screen a + b − a·b (premultiplied, clamp)
+                                                                              ▼
+                                  ColorMatrix (Straight): chỉ viết lại alpha theo blend mode (mục 12.2)
+                                                                              ▼
+                                  DrawImage SourceCopy vào back buffer ─► xoá vùng hình nếu có (mục 12.5)
+                                                                              ▼
+                                  Present(1) ─► Commit ─► DComp scale ×8, bilinear ─► DWM
+```
+
+| Lớp | Độ dày dải | σ blur | Alpha mỗi dải |
+|---|---|---|---|
+| **Inner glow**: nguồn sáng mạnh sát mép | `innerGlowFraction` × cạnh ngắn | 2 × độ dày / 3 (blur radius = 2 × độ dày) | `innerIntensity × opacity` |
+| **Ambient wash**: ánh sáng loang rộng | `spreadFraction` × cạnh ngắn | `blurRadiusFraction` × cạnh ngắn / 3 | `washIntensity × opacity` |
+
+- Hai lớp ghép bằng phép **screen** trên giá trị premultiplied: chỗ chồng nhau sáng hơn từng lớp riêng nhưng không bao giờ vượt 1, nên mép không cháy trắng vì cộng dồn.
+- σ bị chặn ở 250 (giới hạn của D2D Gaussian Blur). Margin của cả hai canvas = ⌈3·σ lớn hơn⌉ + 1.
+- Mỗi lớp có buffer dải riêng, cấp phát một lần (`MaxSegmentCount`), nên vòng render vẫn 0 byte cấp phát.
+
+### 12.2 Blend mode
+
+DWM compose swapchain premultiplied theo công thức `kết quả = glow + màn hình × (1 − alpha)`. `ColorMatrix` ở chế độ `Straight` áp ma trận thẳng lên giá trị premultiplied, không un-premultiply, nên màu glow giữ nguyên và chỉ kênh alpha được viết lại. Nhờ vậy có ba kiểu hoà trộn mà không cần shader riêng:
+
+| `overlay.blendMode` | Alpha sau ColorMatrix | Trên màn hình |
+|---|---|---|
+| `Normal` | giữ nguyên | Glow phủ lên nội dung như một lớp sơn mờ (kiểu Phase 3) |
+| `Screen` (mặc định) | độ sáng Rec. 709 của glow | Xấp xỉ screen blend: glow sáng che nhiều hơn, glow tối gần như trong suốt; nền tối nhuộm màu rõ, nội dung sáng ít bị đục |
+| `Additive` | 0 | `màn hình + glow`: cộng ánh sáng thuần, rực nhất trên nền và giao diện tối; trên nội dung sáng có thể cháy trắng |
+
+Ma trận của từng mode được chốt bằng `BlendMatrixTests`.
+
+### 12.3 Hình học: khung vát góc
+
+- Mỗi zone sở hữu phần khung gần cạnh của nó nhất (khung tranh vát 45°), tới độ dày của lớp. Ở Phase 3, dải trên/dưới sở hữu các góc; nếu giữ cách đó với wash rộng tới 50 %, dải trên/dưới sẽ nuốt hết dải trái/phải.
+- Đường chéo được xấp xỉ bằng bậc thang 12 hình chữ nhật trên một lưới chung. Trong mỗi ô lưới, cạnh ngang dừng ở biên gần góc, cạnh dọc dừng ở biên xa, nên hai bậc thang khớp nhau: không hở, không chồng. Ở 1/8 độ phân giải và dưới blur thì không thấy bậc thang.
+- Độ dày dải = min(spread, nửa chiều vuông góc khi cạnh đối diện cũng có zone, nếu không thì cả chiều). Spread 50 % làm các dải gặp nhau ở tâm, mỗi cạnh vẫn giữ phần hình thang của mình.
+- Dải chạm góc khung vẫn kéo vào margin (kể cả đường chéo) như mục 9.3.
+- **Test:** lấy mẫu dày khắp màn hình để xác nhận mỗi điểm thuộc đúng một dải (spread 0.2, 0.5, màn dọc), không cặp dải nào chồng nhau ở mọi spread, spread 0.5 vẫn giữ đủ bốn cạnh, buffer luôn đủ (`n + 8·13`), và 0 byte cấp phát.
+
+### 12.4 Color grading riêng cho overlay
+
+```
+… nhiệt độ màu ─┬─► overlay: saturation (overlay.saturation) ─► fit 0..1 ─► tone curve ─► sRGB ─► DisplayColors
+                └─► LED: saturation (processing.saturation) ─► fit 0..1 ─► white balance × brightness ─► … ─► LedColors
+```
+
+- **Saturation** 0..2 (mặc định 1.35): cùng công thức có chặn gamut như mục 8.3. Từ khoảng 1.5× trở lên, các màu tím, hồng, xanh neon nổi rõ.
+- **Tone curve** trên độ sáng (kênh lớn nhất), ở giá trị đã mã hoá sRGB: `v' = min(1, gain · 0.5 · (v / 0.5)^contrast)`, rồi nhân cả màu theo cùng tỉ lệ để giữ sắc độ.
+  - `contrast` > 1: phần dưới 0.5 tối đi, phần trên 0.5 sáng lên.
+  - `luminanceGain` nâng toàn bộ.
+  - Cả hai nằm trong 0.5..2, mặc định 1.15 và 1.10.
+- Grading này **chỉ** áp cho overlay. Dải LED vẫn dùng `processing.saturation`, vì nó đã có gamma và giới hạn dòng riêng. Test: `OverlayGrade_ChangesDisplayColorsOnly`, `LedSaturation_ChangesLedColorsOnly`, cùng các test của tone curve: đồng nhất ở thiết lập trung tính, đơn điệu, giữ sắc độ và không ra khỏi 0..1.
+
+### 12.5 Video letterbox: giữ hình sạch, sáng từ mép hình
+
+- `overlay.keepPictureClear` (mặc định bật, cần `letterbox.enabled`) hoạt động khi letterbox detection thấy viền đen ≥ 1 %. Khi đó vùng hình, làm tròn ra ngoài theo pixel render, được xoá khỏi glow sau khi vẽ, nên glow chỉ nằm trên viền đen.
+- Khung phát sáng cũng chuyển từ mép màn hình sang **mép hình** (`GlowFrame.Picture`), phần kéo ra ngoài bằng σ của từng lớp. Viền đen sáng nhất sát hình và tối dần về phía bezel, giống ambient mode của trình phát video.
+- Hình phủ kín màn hình (không có viền) thì không mask, glow chạy như bình thường.
+
+### 12.6 Preset và Settings
+
+| Giá trị | Subtle | Balanced (mặc định) | Cinematic |
+|---|---:|---:|---:|
+| Blend mode | Screen | Screen | Additive |
+| Brightness / Opacity | 80 % / 70 % | 100 % / 85 % | 100 % / 100 % |
+| Inner glow: width / intensity | 2 % / 60 % | 3 % / 85 % | 4 % / 100 % |
+| Ambient wash: spread / blur / intensity | 8 % / 12 % / 20 % | 20 % / 25 % / 40 % | 35 % / 45 % / 65 % |
+| Saturation / contrast / luminance gain | 1.10 / 1.00 / 1.00 | 1.35 / 1.15 / 1.10 | 1.80 / 1.35 / 1.25 |
+
+- Preset chỉ đặt "look". `enabled`, `keepPictureClear` và `resolutionDivisor` giữ nguyên.
+- Tên preset không được lưu. `OverlayPresets.Detect` nhận ra preset từ các giá trị (sai số 1e-4), nên kéo bất kỳ slider nào thì look thành Custom và không nút preset nào còn sáng.
+- Cửa sổ Settings có 4 tab:
+
+  | Tab | Nội dung |
+  |---|---|
+  | Virtual Overlay | Công tắc; 3 nút preset kèm mô tả; Inner glow (Intensity, Width 0.2–10 %); Ambient wash (Intensity, Spread width 0.5–50 %, Blur radius 0–50 %) |
+  | Color & Blend | Blend mode (Normal / Screen / Additive); Keep the picture clear; Light (Brightness, Opacity); Color grading (Saturation 0–2×, Contrast 0.5–2×, Luminance gain 0.5–2×) |
+  | Performance & Mode, Hardware LED | Như Phase 5 |
+
+- `SliderRow` là một dòng gọn gồm nhãn, slider (snap theo bước) và giá trị.
+- Cửa sổ mở theo chiều cao của tab đầu và không vượt work area. Tab dài hơn thì cuộn, footer luôn hiện.
+- `SettingsFormValues` giữ nguyên giá trị đã lưu khi giá trị hiển thị không đổi, nên việc làm tròn để hiển thị không bao giờ phá một preset.
+
+### 12.7 Cấu hình
+
+Khoá mới trong `overlay` của `config.json` (giá trị mặc định = Balanced):
+
+| Khoá | Mặc định | Miền hợp lệ |
+|---|---|---|
+| `blendMode` | `"Screen"` | `Normal`, `Screen`, `Additive` |
+| `innerGlowFraction` / `innerIntensity` | 0.03 / 0.85 | 0.002..0.1 / 0..1 |
+| `spreadFraction` / `blurRadiusFraction` / `washIntensity` | 0.20 / 0.25 / 0.40 | 0.005..0.5 / 0..0.5 / 0..1 |
+| `saturation` / `contrast` / `luminanceGain` | 1.35 / 1.15 / 1.10 | 0..2 / 0.5..2 / 0.5..2 |
+| `keepPictureClear` | true | |
+
+File cấu hình của bản trước vẫn đọc được: khoá thiếu nhận giá trị mặc định, còn `spreadFraction` 0.04 và `blurRadiusFraction` 0.08 cũ được giữ nguyên. Vì vậy look hiện là Custom, và bấm một preset sẽ chuyển sang look mới.
+
+### 12.8 Chi phí GPU
+
+Kích thước mỗi canvas (render + 2 × margin), `resolutionDivisor` 8:
+
+| Màn hình (render) | Subtle | Balanced | Cinematic | Spread 50 % + blur 50 % |
+|---|---|---|---|---|
+| 1920×1080 (240×135) | 276×171 | 310×205 | 364×259 | 378×273 |
+| 3840×2160 (480×270) | 548×338 | 618×408 | 726×516 | 752×542 |
+
+- Mỗi lần màu đổi: hai lần fill, hai Gaussian blur (`Optimization.Balanced`), một arithmetic composite và một color matrix. Ở Cinematic 4K, mỗi canvas khoảng 0.37 MP.
+- Màu không đổi thì vẫn là 0 render, 0 present như mục 9.5.
+
+### 12.9 Kiểm chứng và giới hạn
+
+- `dotnet build -c Release`: 0 warning. `dotnet test`: **423/423** pass (374 ở cuối Phase 5). Test mới: hình học vát góc, picture mask và picture frame, ma trận blend, preset, tone curve, grading tách overlay/LED, form values.
+- **Renderer tham chiếu trên CPU** dựng lại đúng đồ thị này: `ColorPipeline` và `GlowGeometry` thật, Gaussian blur, screen combine, alpha theo blend mode, mask, upscale bilinear, compose kiểu DWM. Dùng nó trên một cảnh neon và một cảnh phim letterbox 2.39:1 để chỉnh giá trị preset. Hai vấn đề thiết kế được phát hiện nhờ cách này:
+  1. Wash phủ lên hình phim, và Cinematic additive làm cháy hình. Cách sửa: thêm Keep the picture clear.
+  2. Viền đen sáng nhất ở bezel thay vì sát hình. Cách sửa: thêm `GlowFrame.Picture`.
+- **Wine 9 + Xvfb**:
+  - 4 tab render đúng.
+  - Bấm Cinematic ghi đủ giá trị vào `config.json`, và sửa saturation thì look chuyển thành Custom.
+  - Trên màn hình cao 640 px, tab cuộn và footer vẫn hiện.
+- **Giới hạn:**
+  - Overlay nằm **trên** nội dung và lấy màu ở mép màn hình (hoặc mép hình khi có letterbox). Nó không vẽ được *phía sau* một video đang nằm trong cửa sổ như extension trình duyệt, vì extension vẽ bên trong trang web, sau thẻ video. Hiệu ứng đẹp nhất khi video toàn màn hình, nhất là video có viền đen với Keep the picture clear.
+  - Additive trên nội dung sáng phủ kín màn hình có thể làm mép cháy trắng. Screen dịu hơn.
+  - Additive dựa vào alpha = 0 trong swapchain premultiplied. Đây là cách DWM compose theo thiết kế nhưng **chưa kiểm chứng trên GPU thật**; chi phí GPU của hai blur σ lớn cũng vậy. Checklist ở [TESTING-WINDOWS.md](TESTING-WINDOWS.md) mục 3.12.

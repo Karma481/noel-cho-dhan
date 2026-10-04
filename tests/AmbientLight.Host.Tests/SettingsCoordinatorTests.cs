@@ -247,13 +247,27 @@ public sealed class SettingsCoordinatorTests : IDisposable
 public sealed class SettingsFormValuesTests
 {
     [Fact]
-    public void From_Defaults_ShowsPercentagesAndTheLedStripOff()
+    public void From_Defaults_ShowsTheBalancedLookInUiUnits_AndTheLedStripOff()
     {
         var values = SettingsFormValues.From(new AppSettings());
 
-        Assert.Equal(
-            new SettingsFormValues(true, 100, 8, 4, 85, 60, true, true, false, string.Empty, 1_000_000),
-            values);
+        Assert.True(values.OverlayEnabled);
+        Assert.Equal(85, values.InnerIntensityPercent);
+        Assert.Equal(3, values.InnerGlowPercent);
+        Assert.Equal(40, values.WashIntensityPercent);
+        Assert.Equal(20, values.SpreadWidthPercent);
+        Assert.Equal(25, values.BlurRadiusPercent);
+        Assert.Equal(OverlayBlendMode.Screen, values.BlendMode);
+        Assert.Equal(100, values.OverlayBrightnessPercent);
+        Assert.Equal(85, values.OpacityPercent);
+        Assert.Equal(1.35, values.Saturation);
+        Assert.Equal(1.15, values.Contrast);
+        Assert.Equal(1.1, values.LuminanceGain);
+        Assert.True(values.KeepPictureClear);
+        Assert.Equal(60, values.TargetFps);
+        Assert.False(values.SerialEnabled);
+        Assert.Equal(string.Empty, values.PortName);
+        Assert.Equal(1_000_000, values.BaudRate);
     }
 
     [Fact]
@@ -261,33 +275,42 @@ public sealed class SettingsFormValuesTests
     {
         var settings = new AppSettings
         {
-            Overlay = new OverlaySettings { Opacity = 0.8543f, SpreadFraction = 0.0437f },
+            Overlay = new OverlaySettings { Opacity = 0.8543f, SpreadFraction = 0.0437f, Saturation = 1.337f },
             LedLayout = new LedLayoutSettings { TopCount = 40 },
         };
 
         var roundTripped = SettingsFormValues.From(settings).ApplyTo(settings);
 
-        // Untouched values keep their exact stored value despite the one-decimal display rounding.
+        // Untouched values keep their exact stored value despite the display rounding.
         Assert.Equal(settings, roundTripped);
     }
 
     [Fact]
-    public void ApplyTo_ChangesOnlyTheEditedValue()
+    public void ApplyTo_ChangesOnlyTheEditedValues()
     {
         var settings = new AppSettings();
-        var values = SettingsFormValues.From(settings) with { OverlayBrightnessPercent = 50, TargetFps = 30 };
+        var values = SettingsFormValues.From(settings) with
+        {
+            OverlayBrightnessPercent = 50,
+            SpreadWidthPercent = 45,
+            Saturation = 1.9,
+            BlendMode = OverlayBlendMode.Additive,
+            KeepPictureClear = false,
+            TargetFps = 30,
+        };
 
         var updated = values.ApplyTo(settings);
 
-        Assert.Equal(0.5f, updated.Overlay.Brightness);
+        Assert.Equal(
+            settings.Overlay with { Brightness = 0.5f, SpreadFraction = 0.45f, Saturation = 1.9f, BlendMode = OverlayBlendMode.Additive, KeepPictureClear = false },
+            updated.Overlay);
         Assert.Equal(30, updated.Capture.MaxFps);
-        Assert.Equal(settings.Overlay with { Brightness = 0.5f }, updated.Overlay);
         Assert.Equal(settings.Processing, updated.Processing);
     }
 
     [Theory]
     [InlineData(0.1, 0.005f)]
-    [InlineData(40, 0.25f)]
+    [InlineData(80, 0.5f)]
     [InlineData(double.NaN, 0.005f)]
     public void ApplyTo_ClampsTheSpreadWidthToTheSliderRange(double percent, float expected)
     {
@@ -296,6 +319,29 @@ public sealed class SettingsFormValuesTests
 
         Assert.Equal(expected, updated.Overlay.SpreadFraction);
         Assert.DoesNotContain(updated.Validate(), issue => issue.Severity == SettingsIssueSeverity.Error);
+    }
+
+    [Fact]
+    public void ApplyTo_ClampsTheColorGrade()
+    {
+        var settings = new AppSettings();
+        var updated = (SettingsFormValues.From(settings) with { Saturation = 3, Contrast = 0.1, LuminanceGain = 9 }).ApplyTo(settings);
+
+        Assert.Equal(2f, updated.Overlay.Saturation);
+        Assert.Equal(0.5f, updated.Overlay.Contrast);
+        Assert.Equal(2f, updated.Overlay.LuminanceGain);
+    }
+
+    [Theory]
+    [InlineData(OverlayPreset.Subtle)]
+    [InlineData(OverlayPreset.Cinematic)]
+    public void Presets_SurviveARoundTripThroughTheForm(OverlayPreset preset)
+    {
+        var settings = new AppSettings { Overlay = OverlayPresets.Apply(new OverlaySettings(), preset) };
+
+        var roundTripped = SettingsFormValues.From(settings).ApplyTo(settings);
+
+        Assert.Equal(preset, OverlayPresets.Detect(roundTripped.Overlay));
     }
 
     [Fact]

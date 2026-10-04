@@ -29,6 +29,7 @@ public sealed class ColorPipelineTests
                 LedGamma = 2.2f,
                 BlackThreshold = 0,
             },
+            Overlay = new OverlaySettings { Saturation = 1f, Contrast = 1f, LuminanceGain = 1f },
             Serial = new SerialSettings { MaxCurrentMilliamps = 0 },
             LedLayout = new LedLayoutSettings { TopCount = 30, RightCount = 20, BottomCount = 30, LeftCount = 20 },
         };
@@ -83,6 +84,53 @@ public sealed class ColorPipelineTests
         Assert.Equal(led.R, led.G);
         Assert.True(led.B < led.R);
         Assert.InRange(led.R, 120, 135); // 50% light
+    }
+
+    [Fact]
+    public void OverlayGrade_ChangesDisplayColorsOnly()
+    {
+        var (pipeline, snapshot, sample, output) = Create(Neutral(s => s with
+        {
+            Overlay = s.Overlay with { Saturation = 2f, Contrast = 1.4f, LuminanceGain = 1.3f },
+        }));
+        Fill(sample, new Vector3(0.30f, 0.10f, 0.40f)); // a muted purple
+
+        pipeline.Ingest(sample, snapshot, Frame);
+        pipeline.Render(Frame, snapshot, output);
+        var gradedDisplay = output.DisplayColors[0];
+        var gradedLed = output.LedColors[0];
+
+        var (plainPipeline, plainSnapshot, plainSample, plainOutput) = Create(Neutral());
+        Fill(plainSample, new Vector3(0.30f, 0.10f, 0.40f));
+        plainPipeline.Ingest(plainSample, plainSnapshot, Frame);
+        plainPipeline.Render(Frame, plainSnapshot, plainOutput);
+
+        // More saturated (larger spread between channels) and brighter on screen; the strip is untouched.
+        var plain = plainOutput.DisplayColors[0];
+        Assert.True(gradedDisplay.B - gradedDisplay.G > plain.B - plain.G, $"{gradedDisplay} is not more vivid than {plain}.");
+        Assert.True(gradedDisplay.B > plain.B);
+        Assert.Equal(plainOutput.LedColors[0], gradedLed);
+    }
+
+    [Fact]
+    public void LedSaturation_ChangesLedColorsOnly()
+    {
+        var (pipeline, snapshot, sample, output) = Create(Neutral(s => s with
+        {
+            Processing = s.Processing with { Saturation = 2f },
+        }));
+        Fill(sample, new Vector3(0.30f, 0.10f, 0.40f));
+
+        pipeline.Ingest(sample, snapshot, Frame);
+        pipeline.Render(Frame, snapshot, output);
+
+        var (plainPipeline, plainSnapshot, plainSample, plainOutput) = Create(Neutral());
+        Fill(plainSample, new Vector3(0.30f, 0.10f, 0.40f));
+        plainPipeline.Ingest(plainSample, plainSnapshot, Frame);
+        plainPipeline.Render(Frame, plainSnapshot, plainOutput);
+
+        Assert.Equal(plainOutput.DisplayColors[0], output.DisplayColors[0]);
+        Assert.NotEqual(plainOutput.LedColors[0], output.LedColors[0]);
     }
 
     [Fact]

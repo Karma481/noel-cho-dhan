@@ -1,6 +1,6 @@
 # Build, đóng gói và test trên Windows
 
-Hướng dẫn chạy thử app trên Windows thật: từ source, từ một file `AmbientLight.exe`, và checklist kiểm tra từng tính năng từ Phase 1 đến Phase 5. Mỗi bước ghi rõ **kết quả mong đợi** và **cách xác nhận**: nhìn bằng mắt, đọc log, hoặc mở `config.json`.
+Hướng dẫn chạy thử app trên Windows thật: từ source, từ một file `AmbientLight.exe`, và checklist kiểm tra từng tính năng từ Phase 1 đến Phase 6. Mỗi bước ghi rõ **kết quả mong đợi** và **cách xác nhận**: nhìn bằng mắt, đọc log, hoặc mở `config.json`.
 
 Đường dẫn dùng xuyên suốt:
 
@@ -31,7 +31,7 @@ Get-Content "$env:LOCALAPPDATA\AmbientLight\logs\ambientlight-$(Get-Date -Format
 ```powershell
 git clone <repo> ; cd noel-cho-dhan
 dotnet build -c Release            # phải ra 0 warning, 0 error
-dotnet test  -c Release            # 374 test, tất cả pass
+dotnet test  -c Release            # 423 test, tất cả pass
 dotnet run --project src/AmbientLight.App -c Release
 dotnet run --project src/AmbientLight.App -c Release -- --verbose   # log mức Debug
 ```
@@ -65,7 +65,7 @@ Tham số dòng lệnh:
 
 ---
 
-## 3. Checklist Phase 5 (App)
+## 3. Checklist Phase 5 (App) và Phase 6 (overlay cinematic)
 
 ### 3.1 Lần chạy đầu
 
@@ -121,7 +121,7 @@ Overlay: on · DISPLAY1 · hidden from screen capture ✓
 
 **c. Ảnh chụp màn hình không chứa glow:** đây là phép thử chính của `WDA_EXCLUDEFROMCAPTURE`.
 
-1. Đặt Opacity 100 % và Spread width 10 % cho dễ thấy.
+1. Chọn preset **Cinematic** cho dễ thấy.
 2. Nhấn **Win+Shift+S** rồi chụp toàn màn hình, dán vào Paint. Thử thêm **PrtScn**.
 3. **Mong đợi:** trên màn hình thật thấy viền sáng rõ, nhưng ảnh chụp **không có viền sáng** (chỉ có nội dung bên dưới).
 
@@ -172,7 +172,7 @@ Overlay: on · DISPLAY1 · hidden from screen capture ✓
 
 | Thao tác | Mong đợi |
 |---|---|
-| Kéo slider Brightness / Opacity / Spread width / Blur radius | Glow đổi ngay khi kéo. `config.json` được ghi khoảng 0.75 giây sau khi thả chuột (một lần cho cả cú kéo). |
+| Kéo một slider bất kỳ (Intensity, Width, Spread width, Blur radius, Brightness, Opacity, Saturation…) | Glow đổi ngay khi kéo. `config.json` được ghi khoảng 0.75 giây sau khi thả chuột (một lần cho cả cú kéo). |
 | Chọn **30 FPS** | `capture.maxFps = 30`. GPU/CPU của app giảm rõ khi video đang chạy. |
 | Sửa tay `config.json`: `"opacity": 5` rồi chạy lại app | Notification "Settings partly reset". Chỉ section `overlay` về mặc định, các section khác giữ nguyên. Có thêm file `config.invalid-<ngày-giờ>.json` chứa bản gốc. |
 | Làm hỏng cú pháp JSON rồi chạy lại | Notification "Settings reset", có file backup, app chạy với giá trị mặc định |
@@ -202,6 +202,42 @@ Ghi lại các số đo này để so sánh giữa các bản. Mở Task Manager
 | Paused, Idle, hoặc game exclusive fullscreen khi LED tắt | CPU 0 %, GPU 0 % |
 | Settings đóng so với mở | RAM giảm sau khi đóng cửa sổ một lúc |
 
+### 3.12 Overlay cinematic (Phase 6)
+
+Chuẩn bị: một video nhiều màu neon (tím, hồng, xanh) ở chế độ toàn màn hình, và một phim 21:9 có viền đen trên dưới. Chi tiết thiết kế ở ARCHITECTURE mục 12.
+
+Nếu `config.json` có từ bản trước, look hiện là **Custom** (không nút preset nào sáng) vì spread và blur cũ được giữ. Bấm một preset để có look mới.
+
+**a. Preset** (tab Virtual Overlay):
+
+| Thao tác | Mong đợi |
+|---|---|
+| Bấm **Subtle** | Quầng sáng dịu sát mép, nội dung gần như không bị nhuộm |
+| Bấm **Balanced** | Mép sáng rõ, ánh sáng loang vào khoảng 1/5 màn hình |
+| Bấm **Cinematic** | Mép rực, màu loang sâu vào trong như tường phòng chiếu; tím/hồng/xanh neon đậm hơn hẳn |
+| Kéo một slider bất kỳ sau khi chọn preset | Nút preset tắt sáng, mô tả đổi thành `Custom look. Pick a preset to start over from it.` |
+| Mở `config.json` sau khi bấm Cinematic | `"blendMode": "Additive"`, `"spreadFraction": 0.35`, `"blurRadiusFraction": 0.45`, `"saturation": 1.8` |
+
+**b. Hai lớp glow:** chọn Balanced, kéo **Ambient wash › Intensity** về 0 %: chỉ còn viền sáng hẹp sát mép (inner glow). Trả lại 40 %, rồi kéo **Inner glow › Intensity** về 0 %: chỉ còn lớp loang rộng, mép không còn "phát quang". Kéo **Spread width** và **Blur radius** lên 50 %: ánh sáng bốn cạnh gặp nhau ở giữa màn hình, góc không đậm hơn cạnh và không có đường chéo cứng.
+
+**c. Blend mode** (tab Color & Blend), xem trên nền desktop tối rồi trên một trang web trắng:
+
+| Mode | Mong đợi |
+|---|---|
+| Normal | Glow phủ lên nội dung như một lớp màu mờ, cả trên nền trắng |
+| Screen | Nền tối được nhuộm màu rõ; trên nền trắng glow nhẹ hơn Normal |
+| Additive | Trên nền tối rực nhất, ánh sáng "cộng" vào nội dung; trên nền trắng mép có thể cháy trắng. **Đây là mục chưa kiểm chứng được trong container:** nếu Additive không hiện gì hoặc hiện như Normal, ghi lại GPU và driver. |
+
+**d. Color grading:** kéo **Saturation** từ 1.0× lên 2.0×: màu glow đậm dần, còn dải LED (nếu có) không đổi. Kéo **Contrast** lên 2.0× trên một cảnh tối: glow ở vùng tối gần như tắt, vùng sáng vẫn rực.
+
+**e. Video letterbox:** mở phim 21:9 toàn màn hình, bật **Keep the picture clear** (mặc định bật).
+
+1. Sau khoảng 1.5 giây (letterbox detection), glow chỉ nằm trong hai viền đen: sáng nhất sát mép hình, tối dần về phía bezel. Hình phim **không** bị nhuộm hay mờ, kể cả ở Cinematic.
+2. Tắt Keep the picture clear: glow quay lại phát từ mép màn hình và loang vào hình.
+3. Chuyển sang video 16:9 phủ kín màn hình: glow trở lại mép màn hình như bình thường.
+
+**f. Chi phí:** Task Manager › Details khi video chạy ở Cinematic trên màn 4K: GPU của AmbientLight vẫn ở mức vài phần trăm. Ghi lại số đo cùng với mục 3.11.
+
 ---
 
 ## 4. Kiểm tra lại Phase 1–4 trên Windows
@@ -224,6 +260,7 @@ Ghi lại các số đo này để so sánh giữa các bản. Mở Task Manager
 |---|---|
 | Không thấy icon tray | Windows 11 gom icon vào menu ^. Kéo ra taskbar, hoặc vào Settings › Personalization › Taskbar › Other system tray icons. Nếu Explorer khởi động chậm, app tự thử lại mỗi 5 giây. |
 | Không có glow, footer `Overlay: hidden (...)` | Windows cũ hơn 2004, hoặc Windows từ chối `WDA_EXCLUDEFROMCAPTURE`. Overlay cố ý giữ ẩn. |
+| Glow quá gắt, hình bị cháy trắng | Chọn blend mode **Screen** hoặc preset **Balanced**; với phim có viền đen, bật **Keep the picture clear** |
 | Footer `Capture: error, retrying` | Xem dòng `Capture failed` trong log. Trên laptop hai GPU: chọn **Power saving** cho AmbientLight (mục 3.6). |
 | Hotkey không ăn | Footer có `taken by another app`: một app khác đã đăng ký tổ hợp đó |
 | Header báo lỗi màu đỏ | Một stage không khởi động được; lý do nằm ngay trên header và trong log (`could not start`) |

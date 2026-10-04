@@ -96,7 +96,8 @@ public sealed class OverlayService : IDisposable
 
     // Overlay-thread state.
     private readonly RedrawTracker _tracker = new();
-    private readonly GlowSegment[] _segments = new GlowSegment[LedLayoutSettings.MaxLedCount];
+    private readonly GlowSegment[] _innerSegments = new GlowSegment[GlowGeometry.MaxSegmentCount(LedLayoutSettings.MaxLedCount)];
+    private readonly GlowSegment[] _washSegments = new GlowSegment[GlowGeometry.MaxSegmentCount(LedLayoutSettings.MaxLedCount)];
     private OverlayWindow? _window;
     private GlowRenderer? _renderer;
     private string? _rendererMonitor;
@@ -106,6 +107,7 @@ public sealed class OverlayService : IDisposable
     private bool _monitorMissingLogged;
     private long _monitorRetryAfterTicks;
     private GlowLayout? _configuredLayout;
+    private OverlayBlendMode? _configuredBlendMode;
     private bool _hasFrame;
 
     // Statistics.
@@ -321,10 +323,11 @@ public sealed class OverlayService : IDisposable
         var renderer = _renderer!;
 
         var layout = GlowGeometry.ComputeLayout(_monitor.Bounds.Width, _monitor.Bounds.Height, overlay);
-        if (_configuredLayout != layout)
+        if (_configuredLayout != layout || _configuredBlendMode != overlay.BlendMode)
         {
-            renderer.Configure(layout);
+            renderer.Configure(layout, overlay.BlendMode);
             _configuredLayout = layout;
+            _configuredBlendMode = overlay.BlendMode;
         }
 
         if (window.ConsumeZOrderChanged())
@@ -347,7 +350,13 @@ public sealed class OverlayService : IDisposable
             return;
         }
 
-        if (!_tracker.NeedsRedraw(colors, layout, overlay, zones))
+        PictureMask? mask = overlay.KeepPictureClear &&
+            settings.Letterbox.Enabled &&
+            GlowGeometry.TryGetPictureMask(layout, _input.ReadSlot.ContentBounds, out var picture)
+                ? picture
+                : null;
+
+        if (!_tracker.NeedsRedraw(colors, layout, overlay, zones, mask))
         {
             if (newFrame)
             {
@@ -357,9 +366,31 @@ public sealed class OverlayService : IDisposable
             return;
         }
 
-        var count = GlowGeometry.BuildSegments(zones.AsSpan(), colors, layout, overlay, _segments);
-        var renderTime = renderer.Render(_segments.AsSpan(0, count));
-        _tracker.MarkDrawn(colors, layout, overlay, zones);
+        // Light comes from the screen edges, or, in letterboxed video, from the picture's edges into the bars.
+        var zoneSpan = zones.AsSpan();
+        var frame = mask is { } pictureArea ? GlowFrame.Picture(pictureArea) : GlowFrame.Screen(layout);
+        var innerCount = GlowGeometry.BuildSegments(
+            zoneSpan,
+            colors,
+            layout,
+            frame,
+            mask is null ? layout.Margin : layout.InnerSigma,
+            layout.InnerSpread,
+            overlay.Brightness,
+            overlay.InnerIntensity * overlay.Opacity,
+            _innerSegments);
+        var washCount = GlowGeometry.BuildSegments(
+            zoneSpan,
+            colors,
+            layout,
+            frame,
+            mask is null ? layout.Margin : layout.WashSigma,
+            layout.WashSpread,
+            overlay.Brightness,
+            overlay.WashIntensity * overlay.Opacity,
+            _washSegments);
+        var renderTime = renderer.Render(_innerSegments.AsSpan(0, innerCount), _washSegments.AsSpan(0, washCount), mask);
+        _tracker.MarkDrawn(colors, layout, overlay, zones, mask);
 
         // Shown only after the first successful present, so the window never appears with undefined content.
         window.Show();
@@ -443,6 +474,7 @@ public sealed class OverlayService : IDisposable
         _renderer = null;
         _rendererMonitor = null;
         _configuredLayout = null;
+        _configuredBlendMode = null;
         _tracker.Invalidate();
     }
 

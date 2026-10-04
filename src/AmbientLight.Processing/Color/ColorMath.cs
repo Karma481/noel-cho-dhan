@@ -64,6 +64,40 @@ public static class ColorMath
         return peak > 1f ? clamped / peak : clamped;
     }
 
+    /// <summary>Encoded (perceptual) value around which <see cref="ApplyToneCurve"/> pivots: mid-grey.</summary>
+    public const float ToneCurvePivot = 0.5f;
+
+    /// <summary>
+    /// Contrast curve and luminance gain on a linear color in range 0..1, preserving its hue and saturation.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The color's brightness is taken as its largest channel (the HSV value), not its luminance: a pure blue
+    /// has a luminance of only 7%, and a luminance-based curve would crush exactly the neon blues and purples
+    /// that should glow. That value is sRGB-encoded so the curve acts on perceived brightness, then
+    /// </para>
+    /// <code>v' = min(1, gain × pivot × (v / pivot)^contrast)</code>
+    /// <para>
+    /// which is the identity for contrast = gain = 1; contrast above 1 pushes values below mid-grey down (deeper
+    /// darks) and values above it up (brighter highlights, which saturate at full brightness). The color is then
+    /// scaled as a whole, so its channel ratios are unchanged and no channel can exceed 1.
+    /// </para>
+    /// </remarks>
+    public static Vector3 ApplyToneCurve(Vector3 linear, float contrast, float gain)
+    {
+        var clamped = Vector3.Max(linear, Vector3.Zero);
+        var peak = MathF.Max(clamped.X, MathF.Max(clamped.Y, clamped.Z));
+        if (peak <= 0f)
+        {
+            return Vector3.Zero;
+        }
+
+        var encoded = LinearToSrgb(peak);
+        var curved = MathF.Min(1f, gain * ToneCurvePivot * MathF.Pow(encoded / ToneCurvePivot, contrast));
+        var newPeak = SrgbToLinear(curved);
+        return Vector3.Min(clamped * (newPeak / peak), Vector3.One);
+    }
+
     /// <summary>Converts linear 0..1 to an sRGB-encoded byte, rounding to nearest.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static byte LinearToSrgbByte(float linear) => (byte)((LinearToSrgb(linear) * 255f) + 0.5f);

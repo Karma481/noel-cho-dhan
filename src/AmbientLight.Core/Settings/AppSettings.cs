@@ -138,8 +138,9 @@ public sealed record ProcessingSettings
     public float Brightness { get; init; } = 1f;
 
     /// <summary>
-    /// Saturation multiplier, 0..2 (1 = unchanged). Values above 1 make LED and overlay colors more vivid;
-    /// the boost is limited per color so no channel is pushed out of gamut.
+    /// Saturation multiplier of the LED strip colors, 0..2 (1 = unchanged). Values above 1 make the strip more
+    /// vivid; the boost is limited per color so no channel is pushed out of gamut. The overlay has its own
+    /// grade (<see cref="OverlaySettings.Saturation"/>).
     /// </summary>
     public float Saturation { get; init; } = 1.2f;
 
@@ -178,31 +179,107 @@ public sealed record ProcessingSettings
     }
 }
 
+/// <summary>How the glow is composited over what is on screen.</summary>
+public enum OverlayBlendMode
+{
+    /// <summary>
+    /// Ordinary alpha blending: the glow is painted over the picture with the configured opacity. Dark scene
+    /// colors darken the screen edges like a vignette.
+    /// </summary>
+    Normal = 0,
+
+    /// <summary>
+    /// Screen-like light blending: the glow only adds light, dark colors are transparent, and bright content
+    /// under the glow stays bright instead of being tinted. The default.
+    /// </summary>
+    Screen = 1,
+
+    /// <summary>
+    /// Pure additive light: the glow's color is added to the picture. The most intense look; bright content
+    /// under the glow saturates towards white.
+    /// </summary>
+    Additive = 2,
+}
+
 /// <summary>Virtual glow overlay settings.</summary>
+/// <remarks>
+/// <para>The glow is two blurred layers combined like light (screen blend), then composited over the screen:</para>
+/// <list type="bullet">
+/// <item><b>Inner glow</b>: a thin, bright band hugging the bezel (<see cref="InnerGlowFraction"/>,
+/// <see cref="InnerIntensity"/>), the "light source".</item>
+/// <item><b>Ambient wash</b>: a very wide, soft layer (<see cref="SpreadFraction"/>, <see cref="BlurRadiusFraction"/>,
+/// <see cref="WashIntensity"/>) that tints the room-like space around the picture, like cinema spill light.</item>
+/// </list>
+/// <para>
+/// Lengths are fractions of the shorter screen side, so the look is identical at any resolution. The color
+/// grade (<see cref="Saturation"/>, <see cref="Contrast"/>, <see cref="LuminanceGain"/>) applies to the overlay
+/// only; the LED strip has its own in <see cref="ProcessingSettings"/>. The defaults are the
+/// <see cref="OverlayPreset.Balanced"/> preset (see <see cref="OverlayPresets"/>).
+/// </para>
+/// </remarks>
 public sealed record OverlaySettings
 {
     /// <summary>Whether the click-through glow overlay is shown.</summary>
     public bool Enabled { get; init; } = true;
 
-    /// <summary>
-    /// Spread width: thickness of the solid color band along each edge before blurring, as a fraction of
-    /// the shorter screen dimension (0.04 = 43 px on 1080p, 86 px on 4K). Fractions keep the look identical
-    /// on monitors of different resolution.
-    /// </summary>
-    public float SpreadFraction { get; init; } = 0.04f;
+    /// <summary>How the glow is composited over the screen content.</summary>
+    public OverlayBlendMode BlendMode { get; init; } = OverlayBlendMode.Screen;
+
+    /// <summary>Intensity of the glow colors, 0..1 (multiplies the sRGB color values).</summary>
+    public float Brightness { get; init; } = 1f;
 
     /// <summary>
-    /// Blur radius: how far the glow fades into the picture beyond the spread band, as a fraction of the
-    /// shorter screen dimension. Implemented as a Gaussian with standard deviation = radius / 3, so the
-    /// glow has faded out almost completely (99.7%) at the radius. 0 gives hard-edged bands.
+    /// Overall strength of the glow, 0..1. In <see cref="OverlayBlendMode.Normal"/> it is the peak opacity; in the
+    /// light blend modes it scales the amount of light added.
     /// </summary>
-    public float BlurRadiusFraction { get; init; } = 0.08f;
-
-    /// <summary>Peak opacity of the glow at the screen edge, 0..1.</summary>
     public float Opacity { get; init; } = 0.85f;
 
-    /// <summary>Intensity of the glow colors, 0..1 (multiplies the sRGB color values; opacity is separate).</summary>
-    public float Brightness { get; init; } = 1f;
+    /// <summary>
+    /// Inner glow width: thickness of the bright band along each edge, as a fraction of the shorter screen side.
+    /// Its blur radius is twice this width, so the band always fades smoothly into the ambient wash.
+    /// </summary>
+    public float InnerGlowFraction { get; init; } = 0.03f;
+
+    /// <summary>Strength of the inner glow layer, 0..1.</summary>
+    public float InnerIntensity { get; init; } = 0.85f;
+
+    /// <summary>
+    /// Ambient wash spread: thickness of the solid color band of the wide layer, as a fraction of the shorter
+    /// screen side (0.2 = 216 px on 1080p). Up to 0.5, where the bands of opposite edges meet in the middle.
+    /// </summary>
+    public float SpreadFraction { get; init; } = 0.20f;
+
+    /// <summary>
+    /// Ambient wash blur radius: how far the wide layer fades into the picture beyond its band, as a fraction
+    /// of the shorter screen side. Implemented as a Gaussian with standard deviation = radius / 3, so the light
+    /// has faded out almost completely (99.7%) at the radius.
+    /// </summary>
+    public float BlurRadiusFraction { get; init; } = 0.25f;
+
+    /// <summary>Strength of the ambient wash layer, 0..1.</summary>
+    public float WashIntensity { get; init; } = 0.40f;
+
+    /// <summary>
+    /// Saturation of the glow colors, 0..2 (1 = as captured). Boosts make neon purples, pinks and blues pop;
+    /// the boost is limited per color so no channel leaves the gamut.
+    /// </summary>
+    public float Saturation { get; init; } = 1.35f;
+
+    /// <summary>
+    /// Contrast curve around mid-grey, 0.5..2 (1 = linear). Above 1 dark scenes give deeper, quieter edges and
+    /// bright colors light up harder.
+    /// </summary>
+    public float Contrast { get; init; } = 1.15f;
+
+    /// <summary>Luminance gain applied after the contrast curve, 0.5..2 (1 = unchanged). Colors saturate at full brightness.</summary>
+    public float LuminanceGain { get; init; } = 1.10f;
+
+    /// <summary>
+    /// In letterboxed or pillarboxed video, keep the glow out of the picture so it fills only the black bars, the
+    /// way a video player's ambient mode lights up the page around the video. No effect while the picture fills
+    /// the screen; relies on <see cref="LetterboxSettings.Enabled"/>.
+    /// </summary>
+    public bool KeepPictureClear { get; init; } = true;
 
     /// <summary>
     /// The glow is rendered at 1/N of its on-screen size and upscaled bilinearly by DirectComposition.
@@ -212,10 +289,21 @@ public sealed record OverlaySettings
 
     internal void Validate(List<SettingsIssue> issues)
     {
-        RangeCheck.Float(issues, "overlay.spreadFraction", SpreadFraction, 0.005f, 0.25f);
-        RangeCheck.Float(issues, "overlay.blurRadiusFraction", BlurRadiusFraction, 0f, 0.25f);
-        RangeCheck.Float(issues, "overlay.opacity", Opacity, 0f, 1f);
+        if (!Enum.IsDefined(BlendMode))
+        {
+            issues.Add(SettingsIssue.Error("overlay.blendMode", "Unknown blend mode."));
+        }
+
         RangeCheck.Float(issues, "overlay.brightness", Brightness, 0f, 1f);
+        RangeCheck.Float(issues, "overlay.opacity", Opacity, 0f, 1f);
+        RangeCheck.Float(issues, "overlay.innerGlowFraction", InnerGlowFraction, 0.002f, 0.1f);
+        RangeCheck.Float(issues, "overlay.innerIntensity", InnerIntensity, 0f, 1f);
+        RangeCheck.Float(issues, "overlay.spreadFraction", SpreadFraction, 0.005f, 0.5f);
+        RangeCheck.Float(issues, "overlay.blurRadiusFraction", BlurRadiusFraction, 0f, 0.5f);
+        RangeCheck.Float(issues, "overlay.washIntensity", WashIntensity, 0f, 1f);
+        RangeCheck.Float(issues, "overlay.saturation", Saturation, 0f, 2f);
+        RangeCheck.Float(issues, "overlay.contrast", Contrast, 0.5f, 2f);
+        RangeCheck.Float(issues, "overlay.luminanceGain", LuminanceGain, 0.5f, 2f);
         RangeCheck.Int(issues, "overlay.resolutionDivisor", ResolutionDivisor, 1, 32);
     }
 }

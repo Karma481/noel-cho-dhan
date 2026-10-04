@@ -101,4 +101,70 @@ public sealed class ColorMathTests
         Assert.Equal(expected.Y, actual.Y, precision: 5);
         Assert.Equal(expected.Z, actual.Z, precision: 5);
     }
+
+    [Fact]
+    public void ToneCurve_IsTheIdentity_AtNeutralSettings()
+    {
+        foreach (var color in new[] { new Vector3(0.6f, 0.3f, 0.1f), new Vector3(0.01f, 0.02f, 0.005f), Vector3.One })
+        {
+            AssertClose(color, ColorMath.ApplyToneCurve(color, contrast: 1f, gain: 1f));
+        }
+    }
+
+    [Fact]
+    public void ToneCurve_Contrast_DeepensDarks_AndBrightensHighlights()
+    {
+        var dark = new Vector3(0.02f, 0.01f, 0.03f);
+        var bright = new Vector3(0.5f, 0.2f, 0.6f);
+
+        var deeper = ColorMath.ApplyToneCurve(dark, contrast: 1.4f, gain: 1f);
+        var brighter = ColorMath.ApplyToneCurve(bright, contrast: 1.4f, gain: 1f);
+
+        Assert.True(deeper.Z < dark.Z, $"{deeper} is not darker than {dark}.");
+        Assert.True(brighter.Z > bright.Z, $"{brighter} is not brighter than {bright}.");
+    }
+
+    [Fact]
+    public void ToneCurve_KeepsHue_AndNeverLeavesTheUnitRange()
+    {
+        var neonBlue = new Vector3(0.05f, 0.1f, 0.9f);
+
+        var result = ColorMath.ApplyToneCurve(neonBlue, contrast: 2f, gain: 2f);
+
+        // Same channel ratios, so the same hue and saturation; the brightest channel saturates at 1.
+        Assert.Equal(1f, result.Z, precision: 5);
+        Assert.Equal(neonBlue.X / neonBlue.Z, result.X / result.Z, precision: 4);
+        Assert.Equal(neonBlue.Y / neonBlue.Z, result.Y / result.Z, precision: 4);
+    }
+
+    [Fact]
+    public void ToneCurve_JudgesBrightnessByTheLargestChannel_SoSaturatedBluesStayBright()
+    {
+        // Pure blue has a luminance of 7%: a luminance-based contrast curve would push it into the shadows.
+        var blue = new Vector3(0f, 0f, 0.8f);
+
+        var result = ColorMath.ApplyToneCurve(blue, contrast: 1.4f, gain: 1f);
+
+        Assert.True(result.Z >= blue.Z, $"{result} was darkened.");
+    }
+
+    [Fact]
+    public void ToneCurve_IsMonotonic()
+    {
+        var previous = -1f;
+        for (var value = 0f; value <= 1f; value += 0.01f)
+        {
+            var result = ColorMath.ApplyToneCurve(new Vector3(value), contrast: 1.35f, gain: 1.25f).X;
+
+            // Float rounding where the curve reaches 1 can differ by one ulp between neighbours.
+            Assert.True(result >= previous - 1e-6f, $"Curve decreases at {value}.");
+            previous = result;
+        }
+    }
+
+    [Fact]
+    public void ToneCurve_OfBlack_IsBlack()
+    {
+        Assert.Equal(Vector3.Zero, ColorMath.ApplyToneCurve(Vector3.Zero, 1.5f, 2f));
+    }
 }

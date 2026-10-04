@@ -15,17 +15,18 @@ namespace AmbientLight.Processing.Pipeline;
 /// <remarks>
 /// <para>Per zone, in linear light until the final encoding:</para>
 /// <code>
-/// sample ─► black threshold ─► temporal smoothing ─► color temperature ─► saturation ─► fit to 0..1
-///                                                                                    │
-///                     ┌──────────────────────────────────────────────────────────────┤
-///                     ▼                                                              ▼
-///      overlay: sRGB encode ─► DisplayColors        LEDs: white balance × brightness ─► sRGB ─► LED gamma
-///                                                                                          ─► power limiter ─► LedColors
+/// sample ─► black threshold ─► temporal smoothing ─► color temperature ─┬─► overlay grade ─► sRGB ─► DisplayColors
+///                                                                        │   (saturation, contrast curve, luminance gain)
+///                                                                        │
+///                                                                        └─► LED saturation ─► fit to 0..1 ─► white balance × brightness
+///                                                                            ─► sRGB ─► LED gamma ─► power limiter ─► LedColors
 /// </code>
 /// <para>
-/// Smoothing runs before the grading steps, which are static per-color transforms; that way a change
-/// of color temperature or saturation in the settings takes effect immediately instead of fading in.
-/// The black threshold runs before smoothing so dark scenes fade out instead of snapping off.
+/// The overlay and the strip are graded separately: a monitor and an LED strip render the same color very
+/// differently, and the overlay's look (vivid neon glow) is a matter of taste that should not change the
+/// strip. Smoothing runs before the grading steps, which are static per-color transforms; that way a
+/// change of the grade in the settings takes effect immediately instead of fading in. The black threshold
+/// runs before smoothing so dark scenes fade out instead of snapping off.
 /// </para>
 /// <para>
 /// All buffers are sized for <see cref="Capacity"/> zones at construction; <see cref="Ingest"/> and
@@ -162,14 +163,18 @@ public sealed class ColorPipeline
 
         for (var i = 0; i < state.Length; i++)
         {
-            var graded = ColorMath.FitToUnitRange(
-                ColorMath.AdjustSaturation(state[i] * parameters.TemperatureGains, parameters.Saturation));
+            var tinted = state[i] * parameters.TemperatureGains;
 
+            var shown = ColorMath.ApplyToneCurve(
+                ColorMath.FitToUnitRange(ColorMath.AdjustSaturation(tinted, parameters.DisplaySaturation)),
+                parameters.DisplayContrast,
+                parameters.DisplayGain);
             display[i] = new ColorRgb(
-                ColorMath.LinearToSrgbByte(graded.X),
-                ColorMath.LinearToSrgbByte(graded.Y),
-                ColorMath.LinearToSrgbByte(graded.Z));
+                ColorMath.LinearToSrgbByte(shown.X),
+                ColorMath.LinearToSrgbByte(shown.Y),
+                ColorMath.LinearToSrgbByte(shown.Z));
 
+            var graded = ColorMath.FitToUnitRange(ColorMath.AdjustSaturation(tinted, parameters.Saturation));
             var led = Vector3.Min(graded * parameters.LedGains, Vector3.One);
             leds[i] = new ColorRgb(
                 ColorMath.LinearToLedByte(led.X, parameters.LedGamma),

@@ -15,7 +15,7 @@ public sealed class RedrawTrackerTests
     {
         var zones = ZoneLayoutBuilder.Build(new LedLayoutSettings());
 
-        Assert.True(new RedrawTracker().NeedsRedraw(new ColorRgb[zones.Length], Layout, Settings, zones));
+        Assert.True(new RedrawTracker().NeedsRedraw(new ColorRgb[zones.Length], Layout, Settings, zones, null));
     }
 
     [Fact]
@@ -23,7 +23,7 @@ public sealed class RedrawTrackerTests
     {
         var (tracker, zones, colors) = Drawn();
 
-        Assert.False(tracker.NeedsRedraw((ColorRgb[])colors.Clone(), Layout, Settings, zones));
+        Assert.False(tracker.NeedsRedraw((ColorRgb[])colors.Clone(), Layout, Settings, zones, null));
     }
 
     [Fact]
@@ -33,7 +33,7 @@ public sealed class RedrawTrackerTests
         var changed = (ColorRgb[])colors.Clone();
         changed[^1] = changed[^1] with { B = (byte)(changed[^1].B + 1) };
 
-        Assert.True(tracker.NeedsRedraw(changed, Layout, Settings, zones));
+        Assert.True(tracker.NeedsRedraw(changed, Layout, Settings, zones, null));
     }
 
     [Fact]
@@ -41,7 +41,7 @@ public sealed class RedrawTrackerTests
     {
         var (tracker, zones, colors) = Drawn();
 
-        Assert.True(tracker.NeedsRedraw(colors, GlowGeometry.ComputeLayout(1920, 1080, Settings), Settings, zones));
+        Assert.True(tracker.NeedsRedraw(colors, GlowGeometry.ComputeLayout(1920, 1080, Settings), Settings, zones, null));
     }
 
     [Fact]
@@ -49,8 +49,22 @@ public sealed class RedrawTrackerTests
     {
         var (tracker, zones, colors) = Drawn();
 
-        Assert.True(tracker.NeedsRedraw(colors, Layout, Settings with { Opacity = 0.5f }, zones));
-        Assert.False(tracker.NeedsRedraw(colors, Layout, Settings with { }, zones));
+        Assert.True(tracker.NeedsRedraw(colors, Layout, Settings with { Opacity = 0.5f }, zones, null));
+        Assert.False(tracker.NeedsRedraw(colors, Layout, Settings with { }, zones, null));
+    }
+
+    [Fact]
+    public void BarsAppearingOrMoving_TriggerARedraw()
+    {
+        var (tracker, zones, colors) = Drawn();
+        var bars = new PictureMask(0f, 34f, 480f, 236f);
+
+        Assert.True(tracker.NeedsRedraw(colors, Layout, Settings, zones, bars));
+
+        tracker.MarkDrawn(colors, Layout, Settings, zones, bars);
+        Assert.False(tracker.NeedsRedraw(colors, Layout, Settings, zones, bars));
+        Assert.True(tracker.NeedsRedraw(colors, Layout, Settings, zones, bars with { Top = 30f }));
+        Assert.True(tracker.NeedsRedraw(colors, Layout, Settings, zones, null));
     }
 
     [Fact]
@@ -59,7 +73,7 @@ public sealed class RedrawTrackerTests
         var (tracker, _, colors) = Drawn();
         var rebuilt = ZoneLayoutBuilder.Build(new LedLayoutSettings());
 
-        Assert.True(tracker.NeedsRedraw(colors, Layout, Settings, rebuilt));
+        Assert.True(tracker.NeedsRedraw(colors, Layout, Settings, rebuilt, null));
     }
 
     [Fact]
@@ -69,19 +83,19 @@ public sealed class RedrawTrackerTests
 
         tracker.Invalidate();
 
-        Assert.True(tracker.NeedsRedraw(colors, Layout, Settings, zones));
+        Assert.True(tracker.NeedsRedraw(colors, Layout, Settings, zones, null));
     }
 
     [Fact]
     public void Checking_AllocatesNothing()
     {
         var (tracker, zones, colors) = Drawn();
-        tracker.NeedsRedraw(colors, Layout, Settings, zones);
+        tracker.NeedsRedraw(colors, Layout, Settings, zones, null);
 
         var before = GC.GetAllocatedBytesForCurrentThread();
         for (var i = 0; i < 1000; i++)
         {
-            tracker.NeedsRedraw(colors, Layout, Settings, zones);
+            tracker.NeedsRedraw(colors, Layout, Settings, zones, null);
         }
 
         Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
@@ -92,7 +106,7 @@ public sealed class RedrawTrackerTests
         var zones = ZoneLayoutBuilder.Build(new LedLayoutSettings());
         var colors = Enumerable.Range(0, zones.Length).Select(i => new ColorRgb((byte)i, (byte)(i * 2), (byte)(255 - i))).ToArray();
         var tracker = new RedrawTracker();
-        tracker.MarkDrawn(colors, Layout, Settings, zones);
+        tracker.MarkDrawn(colors, Layout, Settings, zones, null);
         return (tracker, zones, colors);
     }
 }
